@@ -30,21 +30,29 @@ func (m Model) ViewTree() string {
 	var b strings.Builder
 
 	// Header
-	header := fmt.Sprintf("DUA - Disk Usage Analyzer | Path: %s", m.currentPath)
+	direction := "↓"
+	if m.sortAsc {
+		direction = "↑"
+	}
+
+	header := fmt.Sprintf("DUA - Disk Usage Analyzer | Path: %s | Sort: %s%s", m.currentPath, m.sortMode.String(), direction)
 	b.WriteString(header + "\n")
 	b.WriteString(strings.Repeat("-", len(header)) + "\n")
 
+	var contentBuilder strings.Builder
 	if m.rootDir != nil {
 		visibleLines := m.height - 4 // Reserve space for header and footer
 		if visibleLines < 1 {
 			visibleLines = 10
 		}
-		m.renderDirectoryWithViewport(&b, m.rootDir, 0, 0, m.viewportTop, visibleLines)
+		m.renderDirectoryWithViewport(&contentBuilder, m.rootDir, 0, 0, m.viewportTop, visibleLines)
 	}
+
+	b.WriteString(contentBuilder.String())
 
 	// Footer with controls
 	b.WriteString("\n")
-	controls := "↑↓/jk: navigate • →l: expand • ←h: collapse • q: quit"
+	controls := "↑↓/jk: navigate • →l: expand • ←h: collapse • s: sort • ctrl+s: reverse sort • q: quit"
 	b.WriteString(controls + "\n")
 
 	return b.String()
@@ -120,14 +128,15 @@ func (m Model) findItemAtIndex(dir *scanner.DirInfo, depth int, currentIndex int
 
 	// If expanded, check contents
 	if depth == 0 || m.expanded[dir.Path] {
-		for _, file := range dir.Files {
+		sortedFiles, sortedSubdirs := m.sortDirectoryContents(dir)
+		for _, file := range sortedFiles {
 			if currentIndex == targetIndex {
 				return file.Name, false
 			}
 			currentIndex++
 		}
 
-		for _, subdir := range dir.Subdirs {
+		for _, subdir := range sortedSubdirs {
 			if path, isDir := m.findItemAtIndex(&subdir, depth + 1, currentIndex, targetIndex); path != "" {
 				return path, isDir
 			}
@@ -141,7 +150,7 @@ func (m Model) findItemAtIndex(dir *scanner.DirInfo, depth int, currentIndex int
 
 func (m Model) renderDirectoryWithViewport(b *strings.Builder, dir *scanner.DirInfo, depth int, currentIndex int, viewportTop int, maxLines int) int {
 	// Check if we should render this directory
-	linesUsed := strings.Count(b.String(), "\n") - 2
+	linesUsed := strings.Count(b.String(), "\n")
 	if linesUsed >= maxLines {
 		return currentIndex
 	}
@@ -149,7 +158,12 @@ func (m Model) renderDirectoryWithViewport(b *strings.Builder, dir *scanner.DirI
 	if currentIndex >= viewportTop {
 		indent := strings.Repeat("  ", depth)
 		dirName := fmt.Sprintf("📁 %s/", getBaseName(dir.Path))
-		size := formatSize(dir.Size)
+		var size string
+		if dir.IsLoading {
+			size = "Loading..."
+		} else {
+			size = formatSize(dir.Size)
+		}
 
 		line := fmt.Sprintf("%s%s", indent, dirName)
 
@@ -165,10 +179,11 @@ func (m Model) renderDirectoryWithViewport(b *strings.Builder, dir *scanner.DirI
 	currentIndex++
 
 	// Render contents if expanded
-	if depth == 0 || m.expanded[dir.Path] {
+	if depth == 0 || m.expanded[dir.Path] && linesUsed < maxLines{
 		// Files
-		for _, file := range dir.Files {
-			linesUsed = strings.Count(b.String(), "\n") - 2
+		sortedFiles, sortedSubdirs := m.sortDirectoryContents(dir)
+		for _, file := range sortedFiles {
+			linesUsed = strings.Count(b.String(), "\n")
 			if linesUsed >= maxLines {
 				break
 			}
@@ -192,8 +207,8 @@ func (m Model) renderDirectoryWithViewport(b *strings.Builder, dir *scanner.DirI
 		}
 
 		// Subdirectories
-		for _, subdir := range dir.Subdirs {
-			linesUsed = strings.Count(b.String(), "\n") - 2
+		for _, subdir := range sortedSubdirs {
+			linesUsed = strings.Count(b.String(), "\n")
 			if linesUsed >= maxLines {
 				break
 			}

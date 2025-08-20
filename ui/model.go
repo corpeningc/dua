@@ -1,10 +1,35 @@
 package ui
 
 import (
+	"sort"
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/corpeningc/dua/internal/scanner"
 )
 
+type SortMode int
+const (
+	SortByName SortMode = iota
+	SortByDate
+	SortBySize
+	SortByType
+)
+
+func (s SortMode) String() string {
+	switch s {
+		case SortByName:
+			return "Name"
+		case SortByDate:
+			return "Date"
+		case SortBySize:
+			return "Size"
+		case SortByType:
+			return "Type"
+		default:
+			return "Unknown"
+	}
+}
 
 type Model struct {
 	// Directory data
@@ -15,6 +40,10 @@ type Model struct {
 	cursor int // Which item is selected
 	expanded map[string]bool // Which directories are expanded
 	viewportTop int // First visible item index
+
+	// Sorting state
+	sortMode SortMode
+	sortAsc bool
 
 	// View state
 	width int
@@ -32,6 +61,9 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 
 		width: 80,
 		height: 24,
+
+		sortMode: SortByName,
+		sortAsc: false,
 	}
 }
 
@@ -72,6 +104,10 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 					if path, isDir := m.getCurrentItem(); isDir && path != "" {
 						m.expanded[path] = false
 					}
+				case "ctrl+s":
+					m.sortAsc = !m.sortAsc
+				case "s":
+					m.sortMode = (m.sortMode + 1) % 4 // Cycle through sort modes
 				}
 		}
 		return m, nil
@@ -120,6 +156,87 @@ func (m *Model) loadDirectoryInTree(dir *scanner.DirInfo, targetPath string) {
 		m.loadDirectoryInTree(&dir.Subdirs[i], targetPath)
 	}
 }
+
+func (m Model) sortDirectoryContents(dir *scanner.DirInfo) ([]scanner.FileInfo, []scanner.DirInfo) {
+	files := make([]scanner.FileInfo, len(dir.Files))
+	copy(files, dir.Files)
+
+	subdirs := make([]scanner.DirInfo, len(dir.Subdirs))
+	copy(subdirs, dir.Subdirs)
+
+	m.sortFiles(files)
+	m.sortDirs(subdirs)
+
+	return files, subdirs
+}
+
+func (m Model) sortFiles(files []scanner.FileInfo) {
+	sort.Slice(files, func(i, j int) bool {
+		var result bool
+		switch m.sortMode {
+		case SortByName:
+			result = strings.ToLower(files[i].Name) < strings.ToLower(files[j].Name)
+		case SortBySize:
+			result = files[i].Size < files[j].Size
+		case SortByDate:
+			// Need dates on file info
+			result = strings.ToLower(files[i].Name) < strings.ToLower(files[j].Name)
+		case SortByType:
+			// get extensions
+			extI := getFileExtension(files[i].Name)
+			extJ := getFileExtension(files[j].Name)
+			if extI == extJ {
+				result = strings.ToLower(files[i].Name) < strings.ToLower(files[j].Name)
+			} else {
+				result = strings.ToLower(extI) < strings.ToLower(extJ)
+			}
+		}
+
+		if !m.sortAsc {
+			result = !result
+		}
+
+		return result
+	})
+}
+
+func (m Model) sortDirs(subdirs []scanner.DirInfo) {
+	sort.Slice(subdirs, func(i, j int) bool {
+		var result bool
+
+		switch m.sortMode {
+		case SortByName:
+			nameI := getBaseName(subdirs[i].Path)
+			nameJ := getBaseName(subdirs[j].Path)
+			result = strings.ToLower(nameI) < strings.ToLower(nameJ)
+
+		case SortBySize:
+			result = subdirs[i].Size < subdirs[j].Size
+		case SortByDate:
+			nameI := getBaseName(subdirs[i].Path)
+			nameJ := getBaseName(subdirs[j].Path)
+			result = strings.ToLower(nameI) < strings.ToLower(nameJ)
+		case SortByType:
+			nameI := getBaseName(subdirs[i].Path)
+			nameJ := getBaseName(subdirs[j].Path)
+			result = strings.ToLower(nameI) < strings.ToLower(nameJ)
+		}
+
+		if !m.sortAsc {
+			result = !result
+		}
+
+		return result
+	})
+}
+
+func getFileExtension(filename string) string {
+        parts := strings.Split(filename, ".")
+        if len(parts) > 1 {
+                return parts[len(parts)-1]
+        }
+        return "" // No extension
+  }
 
 // View renders the current state
 func (m Model) View() string {
