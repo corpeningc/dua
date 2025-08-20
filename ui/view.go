@@ -96,20 +96,6 @@ func (m Model) countVisibleItems() int {
 	return m.countDirectoryItems(m.rootDir, 0)
 }
 
-func (m Model) countDirectoryItems(dir *scanner.DirInfo, depth int) int {
-	// Count current directory
-	count := 1
-
-	if depth == 0 || m.expanded[dir.Path] {
-		count += len(dir.Files)
-
-		for _, subdir := range dir.Subdirs {
-			count += m.countDirectoryItems(&subdir, depth+1)
-		}
-	}
-	
-	return count
-}
 
 func (m Model) getCurrentItem() (string, bool) {
 	if m.rootDir == nil {
@@ -148,6 +134,22 @@ func (m Model) findItemAtIndex(dir *scanner.DirInfo, depth int, currentIndex int
 	return "", false
 }
 
+func (m Model) countDirectoryItems(dir *scanner.DirInfo, depth int) int {
+	// Count current directory
+	count := 1
+
+	if depth == 0 || m.expanded[dir.Path] {
+		count += len(dir.Files)
+
+		for _, subdir := range dir.Subdirs {
+			count += m.countDirectoryItems(&subdir, depth+1)
+		}
+	}
+	
+	return count
+}
+
+
 func (m Model) renderDirectoryWithViewport(b *strings.Builder, dir *scanner.DirInfo, depth int, currentIndex int, viewportTop int, maxLines int) int {
 	// Check if we should render this directory
 	linesUsed := strings.Count(b.String(), "\n")
@@ -179,7 +181,7 @@ func (m Model) renderDirectoryWithViewport(b *strings.Builder, dir *scanner.DirI
 	currentIndex++
 
 	// Render contents if expanded
-	if depth == 0 || m.expanded[dir.Path] && linesUsed < maxLines{
+	if (depth == 0 || m.expanded[dir.Path]) && linesUsed < maxLines{
 		// Files
 		sortedFiles, sortedSubdirs := m.sortDirectoryContents(dir)
 		for _, file := range sortedFiles {

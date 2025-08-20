@@ -8,6 +8,12 @@ import (
 	"github.com/corpeningc/dua/internal/scanner"
 )
 
+type LoadingCompleteMsg struct {
+	Path string
+	Success bool
+	Error error
+}
+
 type SortMode int
 const (
 	SortByName SortMode = iota
@@ -77,6 +83,15 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 				m.width = msg.Width
 				m.height = msg.Height
 
+			case LoadingCompleteMsg:
+				dirInfo := m.findDirectoryInTree(m.rootDir, msg.Path)
+				if dirInfo != nil {
+					dirInfo.IsLoading = false
+					if msg.Success {
+						dirInfo.IsLoaded = true
+					}
+				}
+
 			case tea.KeyMsg:
 				switch msg.String() {
 				case "ctrl+c", "q":
@@ -97,7 +112,7 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 					if path, isDir := m.getCurrentItem(); isDir && path != "" {
 						m.expanded[path] = true
 						// Trigger lazy loading if not already loaded
-						m.loadDirectoryContents(path)
+						return m, m.startAsyncLoading(path)
 					}
 				case "left", "h":
 					// Collapse directory
@@ -134,26 +149,6 @@ func (m *Model) adjustViewport() {
 	// Don't scroll past the beginning
 	if m.viewportTop < 0 {
 		m.viewportTop = 0
-	}
-}
-
-// loadDirectoryContents triggers lazy loading for a directory path
-func (m *Model) loadDirectoryContents(path string) {
-	// Find the directory in our tree and load its contents
-	m.loadDirectoryInTree(m.rootDir, path)
-}
-
-// loadDirectoryInTree recursively finds and loads a directory
-func (m *Model) loadDirectoryInTree(dir *scanner.DirInfo, targetPath string) {
-	if dir.Path == targetPath && !dir.IsLoaded && !dir.IsLoading {
-		// Load this directory's contents
-		scanner.LoadDirectoryContents(dir)
-		return
-	}
-
-	// Search in subdirectories
-	for i := range dir.Subdirs {
-		m.loadDirectoryInTree(&dir.Subdirs[i], targetPath)
 	}
 }
 
@@ -237,6 +232,40 @@ func getFileExtension(filename string) string {
         }
         return "" // No extension
   }
+
+	func (m *Model) findDirectoryInTree (dir *scanner.DirInfo, targetPath string) *scanner.DirInfo {
+		if dir.Path == targetPath {
+			return dir
+		}
+
+		// Search in subdirectories
+		for i := range dir.Subdirs {
+			if found := m.findDirectoryInTree(&dir.Subdirs[i], targetPath); found != nil {
+				return found
+			}
+		}
+
+		return nil
+	}
+
+	func (m *Model) startAsyncLoading(path string) tea.Cmd {
+		dirInfo := m.findDirectoryInTree(m.rootDir, path)
+		if dirInfo != nil && !dirInfo.IsLoaded && !dirInfo.IsLoading {
+			return loadDirectoryCmd(dirInfo)
+		}
+		return nil
+	}
+
+	func loadDirectoryCmd(dirInfo *scanner.DirInfo) tea.Cmd {
+		return func() tea.Msg {
+			err := scanner.LoadDirectoryContents(dirInfo)
+			return LoadingCompleteMsg{
+				Path: dirInfo.Path,
+				Success: err == nil,
+				Error: err,
+			}
+		}
+	}
 
 // View renders the current state
 func (m Model) View() string {
