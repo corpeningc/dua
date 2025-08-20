@@ -27,8 +27,8 @@ func main() {
 	fmt.Printf("Scanning directory: %s\n", path)
 	fmt.Printf("Please wait...\n")
 
-	// Scan directory structure
-	dirInfo, err := scanner.ScanDirectory(path)
+	// Scan directory structure with lazy loading
+	dirInfo, err := scanner.ScanDirectoryLazy(path)
 	if err != nil {
 		fmt.Printf("Error scanning directory: %v\n", err)
 		os.Exit(1)

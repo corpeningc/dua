@@ -61,9 +61,11 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 						m.adjustViewport()
 					}
 				case "right", "l", "enter":
-					// Expand directory
+					// Expand directory with lazy loading
 					if path, isDir := m.getCurrentItem(); isDir && path != "" {
 						m.expanded[path] = true
+						// Trigger lazy loading if not already loaded
+						m.loadDirectoryContents(path)
 					}
 				case "left", "h":
 					// Collapse directory
@@ -96,6 +98,26 @@ func (m *Model) adjustViewport() {
 	// Don't scroll past the beginning
 	if m.viewportTop < 0 {
 		m.viewportTop = 0
+	}
+}
+
+// loadDirectoryContents triggers lazy loading for a directory path
+func (m *Model) loadDirectoryContents(path string) {
+	// Find the directory in our tree and load its contents
+	m.loadDirectoryInTree(m.rootDir, path)
+}
+
+// loadDirectoryInTree recursively finds and loads a directory
+func (m *Model) loadDirectoryInTree(dir *scanner.DirInfo, targetPath string) {
+	if dir.Path == targetPath && !dir.IsLoaded && !dir.IsLoading {
+		// Load this directory's contents
+		scanner.LoadDirectoryContents(dir)
+		return
+	}
+
+	// Search in subdirectories
+	for i := range dir.Subdirs {
+		m.loadDirectoryInTree(&dir.Subdirs[i], targetPath)
 	}
 }
 
