@@ -33,3 +33,6 @@ go.work.sum
 
 # Local documentation (learning progress)
 docs/
+
+# Claude configuration files
+.claude/
