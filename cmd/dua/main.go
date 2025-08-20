@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/corpeningc/dua/internal/scanner"
+	"github.com/corpeningc/dua/ui"
 )
 
 func main() {
@@ -15,22 +17,32 @@ func main() {
 	flag.StringVar(&path, "path", ".", "Directory path to analyze")
 	flag.Parse()
 
-	fmt.Printf("Disk Usage Analyzer\n")
-	fmt.Printf("Analyzing path: %s\n", path)
-
+	// Validate path exists
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		fmt.Printf("Error: Path does '%s' not exist\n", path)
+		fmt.Printf("Error: Path '%s' does not exist\n", path)
 		os.Exit(1)
 	}
 
-	dirInfo, err := scanner.ScanDirectory(path)
+	// Show scanning progress
+	fmt.Printf("Scanning directory: %s\n", path)
+	fmt.Printf("Please wait...\n")
 
+	// Scan directory structure
+	dirInfo, err := scanner.ScanDirectory(path)
 	if err != nil {
 		fmt.Printf("Error scanning directory: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Size: %d bytes\n", dirInfo.Size)
-	fmt.Printf("Found %d files and %d subdirectories\n", len(dirInfo.Files), len(dirInfo.Subdirs))
+	// Create TUI model
+	model := ui.NewModel(dirInfo, path)
 
+	// Start the TUI program
+	program := tea.NewProgram(model, tea.WithAltScreen())
+	
+	// Run the program and handle any errors
+	if _, err := program.Run(); err != nil {
+		fmt.Printf("Error running TUI: %v\n", err)
+		os.Exit(1)
+	}
 }
