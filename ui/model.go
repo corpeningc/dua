@@ -14,6 +14,7 @@ type Model struct {
 	// UI state
 	cursor int // Which item is selected
 	expanded map[string]bool // Which directories are expanded
+	viewportTop int // First visible item index
 
 	// View state
 	width int
@@ -27,6 +28,7 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 
 		cursor: 0,
 		expanded: make(map[string]bool),
+		viewportTop: 0,
 
 		width: 80,
 		height: 24,
@@ -50,17 +52,52 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 				case "up", "k":
 					if m.cursor > 0 {
 						m.cursor--
+						m.adjustViewport()
 					}
 				case "down", "j":
-					m.cursor ++
+					maxItems := m.countVisibleItems()
+					if m.cursor < maxItems - 1 {
+						m.cursor++
+						m.adjustViewport()
+					}
 				case "right", "l", "enter":
 					// Expand directory
+					if path, isDir := m.getCurrentItem(); isDir && path != "" {
+						m.expanded[path] = true
+					}
 				case "left", "h":
 					// Collapse directory
+					if path, isDir := m.getCurrentItem(); isDir && path != "" {
+						m.expanded[path] = false
+					}
 				}
 		}
 		return m, nil
 	}
+
+// adjustViewport ensures the cursor stays visible within terminal bounds
+func (m *Model) adjustViewport() {
+	// Reserve 4 lines for header (2) + footer (2)
+	visibleLines := m.height - 4
+	if visibleLines < 1 {
+		visibleLines = 10 // Fallback for very small terminals
+	}
+	
+	// Scroll down if cursor is below visible area
+	if m.cursor >= m.viewportTop + visibleLines {
+		m.viewportTop = m.cursor - visibleLines + 1
+	}
+	
+	// Scroll up if cursor is above visible area  
+	if m.cursor < m.viewportTop {
+		m.viewportTop = m.cursor
+	}
+	
+	// Don't scroll past the beginning
+	if m.viewportTop < 0 {
+		m.viewportTop = 0
+	}
+}
 
 // View renders the current state
 func (m Model) View() string {
