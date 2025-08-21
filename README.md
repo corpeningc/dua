@@ -25,7 +25,11 @@ go install github.com/corpeningc/dua/cmd/dua@latest
 
 Then run:
 ```bash
-dua (runs in current directory)
+dua
+```
+or
+
+``` bash
 dua --path {path}
 ```
 
