@@ -27,6 +27,11 @@ Then run:
 ```bash
 dua
 ```
+or
+
+``` bash
+dua --path {path}
+```
 
 ### Build from Source (Alternative)
 
