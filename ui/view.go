@@ -2,13 +2,18 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/corpeningc/dua/internal/scanner"
 )
 
-var (
+var ( 
+	selectedItemStyle = lipgloss.NewStyle().
+	Background(lipgloss.Color("#7D56F4")).  // Purple background      
+	Foreground(lipgloss.Color("#FFFFFF"))   // White text
+
 	selectedStyle = lipgloss.NewStyle().
 	Bold(true).
 	Foreground(lipgloss.Color("#FAFAFA")).
@@ -117,7 +122,7 @@ func (m Model) findItemAtIndex(dir *scanner.DirInfo, depth int, currentIndex int
 		sortedFiles, sortedSubdirs := m.sortDirectoryContents(dir)
 		for _, file := range sortedFiles {
 			if currentIndex == targetIndex {
-				return file.Name, false
+				return filepath.Join(dir.Path, file.Name), false
 			}
 			currentIndex++
 		}
@@ -171,6 +176,8 @@ func (m Model) renderDirectoryWithViewport(b *strings.Builder, dir *scanner.DirI
 
 		if currentIndex == m.cursor {
 			line = selectedStyle.Render(line)
+		} else if m.selected[dir.Path] {
+			line = selectedItemStyle.Render(line)
 		} else {
 			line = directoryStyle.Render(line)
 		}
@@ -195,9 +202,12 @@ func (m Model) renderDirectoryWithViewport(b *strings.Builder, dir *scanner.DirI
 				fileName := fmt.Sprintf("📄 %s", file.Name)
 				fileSize := formatSize(file.Size)
 
+				filePath := filepath.Join(dir.Path, file.Name)
 				fileLine := fmt.Sprintf("%s%s", fileIndent, fileName)
 				if currentIndex == m.cursor {
 					fileLine = selectedStyle.Render(fileLine)
+				} else if m.selected[filePath] {
+					fileLine = selectedItemStyle.Render(fileLine)
 				} else {
 					fileLine = fileStyle.Render(fileLine)
 				}

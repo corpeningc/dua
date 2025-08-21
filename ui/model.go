@@ -44,8 +44,13 @@ type Model struct {
 
 	// UI state
 	cursor int // Which item is selected
+	selected map[string]bool // Which items are selected
 	expanded map[string]bool // Which directories are expanded
 	viewportTop int // First visible item index
+
+	// Visual mode
+	visualMode bool
+	visualStart int // Anchor point for visual mode
 
 	// Sorting state
 	sortMode SortMode
@@ -63,7 +68,11 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 
 		cursor: 0,
 		expanded: make(map[string]bool),
+		selected: make(map[string]bool),
 		viewportTop: 0,
+
+		visualMode: false,
+		visualStart: -1,
 
 		width: 80,
 		height: 24,
@@ -99,12 +108,18 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 				case "up", "k":
 					if m.cursor > 0 {
 						m.cursor--
+						if (m.visualMode) {
+							m.updateVisualSelection()
+						}
 						m.adjustViewport()
 					}
 				case "down", "j":
 					maxItems := m.countVisibleItems()
 					if m.cursor < maxItems - 1 {
 						m.cursor++
+						if (m.visualMode) {
+							m.updateVisualSelection()
+						}
 						m.adjustViewport()
 					}
 				case "right", "l", "enter":
@@ -123,6 +138,28 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 					m.sortAsc = !m.sortAsc
 				case "s":
 					m.sortMode = (m.sortMode + 1) % 4 // Cycle through sort modes
+				case "esc":
+					m.visualMode = false
+					m.visualStart = -1
+					m.selected = make(map[string]bool)
+				case "t":
+					// Add current item to selected
+					if path, _ := m.getCurrentItem(); path != "" {
+						m.selected[path] = true
+					}
+				case "v":
+					if m.visualMode {
+						m.visualMode = false
+						m.visualStart = -1
+						m.selected = make(map[string]bool)
+					} else {
+						m.visualMode = true
+						m.visualStart = m.cursor
+
+						if path, _ := m.getCurrentItem(); path != "" {
+							m.selected[path] = true
+						}
+					}
 				}
 		}
 		return m, nil
@@ -263,6 +300,19 @@ func getFileExtension(filename string) string {
 				Path: dirInfo.Path,
 				Success: err == nil,
 				Error: err,
+			}
+		}
+	}
+
+	func (m *Model) updateVisualSelection() {
+		// Clear selected and recalculate range
+		m.selected = make(map[string]bool)
+		start := min(m.visualStart, m.cursor)
+		end := max(m.visualStart, m.cursor)
+		
+		for i := start; i <= end; i++ {
+			if path, _ := m.findItemAtIndex(m.rootDir, 0, 0, i); path != "" {
+				m.selected[path] = true
 			}
 		}
 	}
