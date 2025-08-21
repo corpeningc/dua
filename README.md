@@ -25,7 +25,8 @@ go install github.com/corpeningc/dua/cmd/dua@latest
 
 Then run:
 ```bash
-dua
+dua (runs in current directory)
+dua --path {path}
 ```
 
 ### Build from Source (Alternative)
