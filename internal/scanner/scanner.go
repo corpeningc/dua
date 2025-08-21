@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 )
 
@@ -25,11 +26,14 @@ type FileInfo struct {
 
 // ScanDirectoryLazy performs fast parallel scan with sizes but no file enumeration
 func ScanDirectoryLazy(path string) (*DirInfo, error) {
-	return scanDirectoryParallel(path)
+	// Limit goroutines to prevent resource exhaustion
+	maxWorkers := runtime.NumCPU() * 2
+	sem := make(chan struct{}, maxWorkers)
+	return scanDirectoryParallel(path, sem)
 }
 
 // scanDirectoryParallel performs parallel directory size calculation
-func scanDirectoryParallel(path string) (*DirInfo, error) {
+func scanDirectoryParallel(path string, sem chan struct{}) (*DirInfo, error) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read directory %s: %w", path, err)
@@ -55,22 +59,38 @@ func scanDirectoryParallel(path string) (*DirInfo, error) {
 		}
 	}
 
-	// Process directories in parallel
+	// Process directories in parallel using worker pool
 	if len(dirs) > 0 {
 		sizeChan := make(chan int64, len(dirs))
+		dirChan := make(chan os.DirEntry, len(dirs))
 		var wg sync.WaitGroup
 		
+		// Send all directories to work channel
 		for _, dir := range dirs {
+			dirChan <- dir
+		}
+		close(dirChan)
+		
+		// Start worker goroutines
+		maxWorkers := cap(sem)
+		if maxWorkers > len(dirs) {
+			maxWorkers = len(dirs)
+		}
+		
+		for i := 0; i < maxWorkers; i++ {
 			wg.Add(1)
-			go func(d os.DirEntry) {
+			go func() {
 				defer wg.Done()
-				subpath := filepath.Join(path, d.Name())
-				if subInfo, err := scanDirectoryParallel(subpath); err == nil {
-					sizeChan <- subInfo.Size
-				} else {
-					sizeChan <- 0 // Skip inaccessible directories
+				
+				for d := range dirChan {
+					subpath := filepath.Join(path, d.Name())
+					if subInfo, err := scanDirectoryParallel(subpath, sem); err == nil {
+						sizeChan <- subInfo.Size
+					} else {
+						sizeChan <- 0 // Skip inaccessible directories
+					}
 				}
-			}(dir)
+			}()
 		}
 		
 		go func() {

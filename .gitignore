@@ -36,3 +36,4 @@ docs/
 
 # Claude configuration files
 .claude/
+CLAUDE.md
