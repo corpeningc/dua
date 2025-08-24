@@ -1,6 +1,9 @@
 package ui
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -12,6 +15,13 @@ type LoadingCompleteMsg struct {
 	Path string
 	Success bool
 	Error error
+}
+
+type BulkDeletionMsg struct {
+	DeletedPaths []string
+	SuccessCount int
+	ErrorCount int
+	Erros []error
 }
 
 type SortMode int
@@ -46,11 +56,15 @@ type Model struct {
 	cursor int // Which item is selected
 	selected map[string]bool // Which items are selected
 	expanded map[string]bool // Which directories are expanded
+	markedForDeletion map[string]bool
 	viewportTop int // First visible item index
 
 	// Visual mode
 	visualMode bool
 	visualStart int // Anchor point for visual mode
+
+	// Deletion mode
+	deletionMode bool
 
 	// Sorting state
 	sortMode SortMode
@@ -100,6 +114,21 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 						dirInfo.IsLoaded = true
 					}
 				}
+			
+			// Update tree
+			case BulkDeletionMsg:
+				for _, path := range msg.DeletedPaths {
+					m.removeItemFromTree(path)
+				}
+				
+				// Reset visual
+				m.visualMode = false
+				m.visualStart = - 1
+				m.selected = make(map[string]bool)
+
+				// Reset deletion
+				m.deletionMode = false
+				m.markedForDeletion = make(map[string]bool)
 
 			case tea.KeyMsg:
 				switch msg.String() {
@@ -139,14 +168,50 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 				case "s":
 					m.sortMode = (m.sortMode + 1) % 4 // Cycle through sort modes
 				case "esc":
+					// Turn off visual mode and deletion mode
 					m.visualMode = false
 					m.visualStart = -1
 					m.selected = make(map[string]bool)
+					m.deletionMode = false
+					m.markedForDeletion = make(map[string]bool)
 				case "t":
 					// Add current item to selected
 					if path, _ := m.getCurrentItem(); path != "" {
 						m.selected[path] = true
 					}
+				case "d":
+					// Deletion mode already on
+					if m.deletionMode {
+						if len(m.markedForDeletion) > 0 {
+							return m, m.performBulkDeletion()
+						}
+					} else {
+						m.deletionMode = true
+						m.markedForDeletion = make(map[string]bool)
+
+						if m.visualMode && len(m.selected) > 0 {
+							for path := range m.selected {
+								m.markedForDeletion[path] = true
+							}
+						} else {
+							if path, _ := m.getCurrentItem(); path != "" {
+								m.markedForDeletion[path] = true
+							}
+						}
+					}
+				// Navigate to top
+				case "g":
+					m.cursor = 0
+					if m.visualMode {
+						m.updateVisualSelection()
+					}
+					m.adjustViewport()
+				case "G":
+					m.cursor = m.countVisibleItems() - 1
+					if m.visualMode {
+						m.updateVisualSelection()
+					}
+					m.adjustViewport()
 				case "v":
 					if m.visualMode {
 						m.visualMode = false
@@ -263,59 +328,145 @@ func (m Model) sortDirs(subdirs []scanner.DirInfo) {
 }
 
 func getFileExtension(filename string) string {
-        parts := strings.Split(filename, ".")
-        if len(parts) > 1 {
-                return parts[len(parts)-1]
-        }
-        return "" // No extension
-  }
+	parts := strings.Split(filename, ".")
+	if len(parts) > 1 {
+					return parts[len(parts)-1]
+	}
+	return "" // No extension
+}
 
-	func (m *Model) findDirectoryInTree (dir *scanner.DirInfo, targetPath string) *scanner.DirInfo {
-		if dir.Path == targetPath {
-			return dir
+func (m *Model) findDirectoryInTree (dir *scanner.DirInfo, targetPath string) *scanner.DirInfo {
+	if dir.Path == targetPath {
+	return dir
+	}
+
+	// Search in subdirectories
+	for i := range dir.Subdirs {
+		if found := m.findDirectoryInTree(&dir.Subdirs[i], targetPath); found != nil {
+			return found
 		}
+	}
+	return nil
+}
 
-		// Search in subdirectories
-		for i := range dir.Subdirs {
-			if found := m.findDirectoryInTree(&dir.Subdirs[i], targetPath); found != nil {
-				return found
+func (m *Model) startAsyncLoading(path string) tea.Cmd {
+	dirInfo := m.findDirectoryInTree(m.rootDir, path)
+	if dirInfo != nil && !dirInfo.IsLoaded && !dirInfo.IsLoading {
+		return loadDirectoryCmd(dirInfo)
+	}
+	return nil
+}
+
+func loadDirectoryCmd(dirInfo *scanner.DirInfo) tea.Cmd {
+	return func() tea.Msg {
+		err := scanner.LoadDirectoryContents(dirInfo)
+		return LoadingCompleteMsg{
+			Path: dirInfo.Path,
+			Success: err == nil,
+			Error: err,
+		}
+	}
+}
+
+func (m *Model) updateVisualSelection() {
+	// Clear selected and recalculate range
+	m.selected = make(map[string]bool)
+	start := min(m.visualStart, m.cursor)
+	end := max(m.visualStart, m.cursor)
+	
+	for i := start; i <= end; i++ {
+		if path, _ := m.findItemAtIndex(m.rootDir, 0, 0, i); path != "" {
+			m.selected[path] = true
+		}
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	} else {
+		return b
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	} else {
+		return b
+	}
+}
+
+func (m Model) performBulkDeletion() tea.Cmd {
+	pathsToDelete := make([]string, 0, len(m.markedForDeletion))
+
+	for path := range m.markedForDeletion {
+		pathsToDelete = append(pathsToDelete, path)
+	}
+
+	return func() tea.Msg {
+		var errors []error
+		var deletedPaths []string
+
+		for _, path := range pathsToDelete {
+			if err := os.RemoveAll(path); err != nil {
+				errors = append(errors, fmt.Errorf("%s: %w", path, err))
+			} else {
+				deletedPaths = append(deletedPaths, path)
 			}
 		}
 
-		return nil
-	}
-
-	func (m *Model) startAsyncLoading(path string) tea.Cmd {
-		dirInfo := m.findDirectoryInTree(m.rootDir, path)
-		if dirInfo != nil && !dirInfo.IsLoaded && !dirInfo.IsLoading {
-			return loadDirectoryCmd(dirInfo)
+		return BulkDeletionMsg{
+			DeletedPaths: deletedPaths,
+			SuccessCount: len(deletedPaths),
+			ErrorCount: len(errors),
+			Erros: errors,
 		}
-		return nil
 	}
+}
 
-	func loadDirectoryCmd(dirInfo *scanner.DirInfo) tea.Cmd {
-		return func() tea.Msg {
-			err := scanner.LoadDirectoryContents(dirInfo)
-			return LoadingCompleteMsg{
-				Path: dirInfo.Path,
-				Success: err == nil,
-				Error: err,
+func (m *Model) removeItemFromTree(targetPath string) {
+	parentPath := filepath.Dir(targetPath)
+
+	if parent := m.findDirectoryInTree(m.rootDir, parentPath); parent != nil {
+		for i, file := range parent.Files {
+			if filepath.Join(parent.Path, file.Name) == targetPath {
+				parent.Files = append(parent.Files[:i], parent.Files[i+1:]...)
+				parent.Size -= file.Size
+				break
 			}
 		}
-	}
-
-	func (m *Model) updateVisualSelection() {
-		// Clear selected and recalculate range
-		m.selected = make(map[string]bool)
-		start := min(m.visualStart, m.cursor)
-		end := max(m.visualStart, m.cursor)
 		
-		for i := start; i <= end; i++ {
-			if path, _ := m.findItemAtIndex(m.rootDir, 0, 0, i); path != "" {
-				m.selected[path] = true
+		for i, subdir := range parent.Subdirs {
+			if subdir.Path == targetPath {
+				parent.Subdirs = append(parent.Subdirs[:i], parent.Subdirs[i+1:]...)
+				parent.Size -= subdir.Size
+				parent.SubdirCount--
+				break
 			}
 		}
+
+		m.updateParentSizes(parentPath)
 	}
+} 
+
+func (m *Model) updateParentSizes(path string) {
+	for path != "/" && path != "." {
+		if dir := m.findDirectoryInTree(m.rootDir, path); dir != nil {
+			var newSize int64
+			for _, file := range dir.Files {
+				newSize += file.Size
+			}
+
+			for _, subdir := range dir.Subdirs {
+				newSize += subdir.Size
+			}
+
+			dir.Size = newSize
+		}
+		path = filepath.Dir(path)
+	}
+}
 
 // View renders the current state
 func (m Model) View() string {

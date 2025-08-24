@@ -28,6 +28,11 @@ var (
 	sizeStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("#626262")).
 	Align(lipgloss.Right)
+
+	markedForDeletionStyle = lipgloss.NewStyle().
+	Bold(true).
+	Foreground(lipgloss.Color("#FFFFFF")).
+	Background(lipgloss.Color("#CC0000"))
 )
 
 
@@ -57,7 +62,12 @@ func (m Model) ViewTree() string {
 
 	// Footer with controls
 	b.WriteString("\n")
-	controls := "↑↓/jk: navigate • →l: expand • ←h: collapse • s: sort • ctrl+s: reverse sort • q: quit"
+	var controls string
+	if m.deletionMode {
+		controls = fmt.Sprintf("%d marked for deletion • d: DELETE • esc: cancel", len(m.markedForDeletion))
+	}	else {
+		controls = "↑↓/jk: navigate • →l: expand • ←h: collapse • s: sort • ctrl+s: reverse sort • q: quit"
+	}
 	b.WriteString(controls + "\n")
 
 	return b.String()
@@ -176,6 +186,8 @@ func (m Model) renderDirectoryWithViewport(b *strings.Builder, dir *scanner.DirI
 
 		if currentIndex == m.cursor {
 			line = selectedStyle.Render(line)
+		} else if m.markedForDeletion[dir.Path] {
+			line = markedForDeletionStyle.Render(line)
 		} else if m.selected[dir.Path] {
 			line = selectedItemStyle.Render(line)
 		} else {
@@ -204,8 +216,11 @@ func (m Model) renderDirectoryWithViewport(b *strings.Builder, dir *scanner.DirI
 
 				filePath := filepath.Join(dir.Path, file.Name)
 				fileLine := fmt.Sprintf("%s%s", fileIndent, fileName)
+
 				if currentIndex == m.cursor {
 					fileLine = selectedStyle.Render(fileLine)
+				} else if m.markedForDeletion[filePath] {
+					fileLine = markedForDeletionStyle.Render(fileLine)
 				} else if m.selected[filePath] {
 					fileLine = selectedItemStyle.Render(fileLine)
 				} else {
