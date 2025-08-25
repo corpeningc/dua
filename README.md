@@ -14,7 +14,7 @@ A fast, interactive terminal-based directory analysis tool built in Go using the
 ## Installation
 
 ### Prerequisites
-- Go 1.19 or later
+- Go 1.25 or later
 
 ### Quick Install
 
