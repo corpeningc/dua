@@ -20,7 +20,7 @@ A fast, interactive terminal-based directory analysis tool built in Go using the
 
 Install directly from GitHub:
 ```bash
-go install github.com/corpeningc/dua/cmd/dua@latest
+go install github.com/corpeningc/dua@latest
 ```
 
 Then run:
