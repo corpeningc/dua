@@ -252,50 +252,6 @@ func NewStreamingModel(path string) Model {
 		}
 	}
 
-	// continueStreamingUpdates continues processing streaming updates
-	func (m Model) continueStreamingUpdates() tea.Cmd {
-		if m.updateChan == nil || m.streamingBuilder == nil {
-			return nil
-		}
-
-		return func() tea.Msg {
-			// Non-blocking check for updates
-			select {
-			case update, ok := <-m.updateChan:
-				if !ok {
-					// Channel closed, streaming complete
-					m.isScanning = false
-					return StreamingCompleteMsg{
-						TotalFiles: m.progressFiles,
-						TotalDirs: m.progressDirs,
-						TotalBytes: m.progressBytes,
-						DirInfo: m.streamingBuilder.GetSnapshot(),
-					}
-				}
-
-				// Process the update
-				m.streamingBuilder.ProcessUpdate(update)
-
-				// Return updated model and continue
-				return StreamingModelUpdateMsg{
-					Model: m.streamingBuilder.GetSnapshot(),
-					UpdateChan: m.updateChan,
-					Builder: m.streamingBuilder,
-					Scanner: m.realTimeScanner,
-				}
-
-			default:
-				// No updates available, wait a bit and try again
-				time.Sleep(100 * time.Millisecond)
-				return StreamingModelUpdateMsg{
-					Model: m.streamingBuilder.GetSnapshot(),
-					UpdateChan: m.updateChan,
-					Builder: m.streamingBuilder,
-					Scanner: m.realTimeScanner,
-				}
-			}
-		}
-	}
 
 	func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg := msg.(type) {
