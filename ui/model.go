@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/corpeningc/dua/internal/scanner"
@@ -22,6 +23,33 @@ type BulkDeletionMsg struct {
 	SuccessCount int
 	ErrorCount int
 	Erros []error
+}
+
+// New message types for streaming updates
+type StreamingUpdateMsg struct {
+	UpdatedDir *scanner.StreamingDirInfo
+}
+
+type StreamingCompleteMsg struct {
+	TotalFiles int64
+	TotalDirs  int64
+	TotalBytes int64
+	Duration   time.Duration
+	DirInfo    *scanner.DirInfo // Add the scanned directory data
+}
+
+type StreamingProgressMsg struct {
+	Files int64
+	Dirs  int64
+	Bytes int64
+}
+
+// Real-time streaming message
+type StreamingModelUpdateMsg struct {
+	Model      *scanner.DirInfo
+	Scanner    *scanner.RealTimeScanner
+	Builder    *scanner.StreamingModelBuilder
+	UpdateChan <-chan scanner.StreamUpdate
 }
 
 type SortMode int
@@ -51,6 +79,19 @@ type Model struct {
 	// Directory data
 	rootDir *scanner.DirInfo
 	currentPath string
+
+	// Real-time streaming support
+	realTimeScanner  *scanner.RealTimeScanner
+	streamingBuilder *scanner.StreamingModelBuilder
+	updateChan       <-chan scanner.StreamUpdate
+	streamingMode    bool
+	isScanning       bool
+	scanStartTime    time.Time
+
+	// Progress tracking
+	progressFiles int64
+	progressDirs  int64
+	progressBytes int64
 
 	// UI state
 	cursor int // Which item is selected
@@ -93,11 +134,167 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 
 		sortMode: SortByName,
 		sortAsc: false,
+
+		streamingMode: false,
+		isScanning: false,
 	}
 }
 
+// NewStreamingModel creates a model with streaming support enabled
+func NewStreamingModel(path string) Model {
+	// Create immediate empty structure - NO blocking scan!
+	rootDir := &scanner.DirInfo{
+		Path: path,
+		Size: 0,
+		Files: make([]scanner.FileInfo, 0),
+		Subdirs: make([]scanner.DirInfo, 0),
+		IsLoaded: false,
+		IsLoading: true,
+		FileCount: 0,
+		SubdirCount: 0,
+	}
+
+	model := Model {
+		rootDir: rootDir,
+		currentPath: path,
+		streamingMode: true,
+		isScanning: true, // Will start scanning after UI opens
+		scanStartTime: time.Now(),
+
+		cursor: 0,
+		expanded: make(map[string]bool),
+		selected: make(map[string]bool),
+		viewportTop: 0,
+
+		visualMode: false,
+		visualStart: -1,
+
+		width: 80,
+		height: 24,
+
+		sortMode: SortByName,
+		sortAsc: false,
+	}
+
+	return model
+}
+
 	func (m Model) Init() tea.Cmd {
+		// Start simple background loading after UI is open
+		if m.streamingMode {
+			return m.startSimpleStreaming()
+		}
 		return nil
+	}
+
+	// startSimpleStreaming does immediate directory listing then background size calc
+	func (m Model) startSimpleStreaming() tea.Cmd {
+		return func() tea.Msg {
+			// Step 1: Get immediate directory structure (files and folders, no sizes)
+			entries, err := os.ReadDir(m.currentPath)
+			if err != nil {
+				return LoadingCompleteMsg{
+					Path: m.currentPath,
+					Success: false,
+					Error: err,
+				}
+			}
+
+			// Create directory info with immediate listings
+			dirInfo := &scanner.DirInfo{
+				Path:    m.currentPath,
+				Size:    0, // Will calculate in background
+				Files:   make([]scanner.FileInfo, 0),
+				Subdirs: make([]scanner.DirInfo, 0),
+				IsLoaded: true,  // Mark as loaded so it shows content
+				IsLoading: false,
+			}
+
+			// Add files (these are fast to get sizes for)
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					if info, err := entry.Info(); err == nil {
+						dirInfo.Files = append(dirInfo.Files, scanner.FileInfo{
+							Name: entry.Name(),
+							Size: info.Size(),
+						})
+						dirInfo.Size += info.Size()
+						dirInfo.FileCount++
+					}
+				}
+			}
+
+			// Add subdirectories (no sizes yet)
+			for _, entry := range entries {
+				if entry.IsDir() {
+					fullPath := filepath.Join(m.currentPath, entry.Name())
+					subdir := scanner.DirInfo{
+						Path:        fullPath,
+						Size:        0, // Will calculate later
+						Files:       make([]scanner.FileInfo, 0),
+						Subdirs:     make([]scanner.DirInfo, 0),
+						IsLoaded:    false,
+						IsLoading:   false,
+						FileCount:   0,
+						SubdirCount: 0,
+					}
+					dirInfo.Subdirs = append(dirInfo.Subdirs, subdir)
+					dirInfo.SubdirCount++
+				}
+			}
+
+			return StreamingCompleteMsg{
+				TotalFiles: int64(dirInfo.FileCount),
+				TotalDirs: int64(dirInfo.SubdirCount),
+				TotalBytes: dirInfo.Size,
+				DirInfo: dirInfo,
+			}
+		}
+	}
+
+	// continueStreamingUpdates continues processing streaming updates
+	func (m Model) continueStreamingUpdates() tea.Cmd {
+		if m.updateChan == nil || m.streamingBuilder == nil {
+			return nil
+		}
+
+		return func() tea.Msg {
+			// Non-blocking check for updates
+			select {
+			case update, ok := <-m.updateChan:
+				if !ok {
+					// Channel closed, streaming complete
+					m.isScanning = false
+					return StreamingCompleteMsg{
+						TotalFiles: m.progressFiles,
+						TotalDirs: m.progressDirs,
+						TotalBytes: m.progressBytes,
+						DirInfo: m.streamingBuilder.GetSnapshot(),
+					}
+				}
+
+				// Process the update
+				m.streamingBuilder.ProcessUpdate(update)
+
+				// Return updated model and continue
+				return StreamingModelUpdateMsg{
+					Model: m.streamingBuilder.GetSnapshot(),
+					UpdateChan: m.updateChan,
+					Builder: m.streamingBuilder,
+					Scanner: m.realTimeScanner,
+				}
+
+			default:
+				// No updates available, wait a bit and try again
+				time.Sleep(100 * time.Millisecond)
+				return StreamingModelUpdateMsg{
+					Model: m.streamingBuilder.GetSnapshot(),
+					UpdateChan: m.updateChan,
+					Builder: m.streamingBuilder,
+					Scanner: m.realTimeScanner,
+				}
+			}
+		}
 	}
 
 	func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -115,12 +312,39 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 					}
 				}
 			
+			// Real-time streaming updates - simplified to avoid infinite loops
+			case StreamingModelUpdateMsg:
+				// Update model with streaming data
+				if msg.Model != nil {
+					m.rootDir = msg.Model
+					m.expanded[msg.Model.Path] = true // Auto-expand root
+					m.isScanning = false // Mark as complete
+				}
+
+			case StreamingProgressMsg:
+				m.progressFiles = msg.Files
+				m.progressDirs = msg.Dirs
+				m.progressBytes = msg.Bytes
+
+			case StreamingCompleteMsg:
+				m.isScanning = false
+				m.progressFiles = msg.TotalFiles
+				m.progressDirs = msg.TotalDirs
+				m.progressBytes = msg.TotalBytes
+
+				// Update rootDir with scanned data
+				if msg.DirInfo != nil {
+					m.rootDir = msg.DirInfo
+					// Auto-expand the root directory so user can see contents immediately
+					m.expanded[msg.DirInfo.Path] = true
+				}
+
 			// Update tree
 			case BulkDeletionMsg:
 				for _, path := range msg.DeletedPaths {
 					m.removeItemFromTree(path)
 				}
-				
+
 				// Reset visual
 				m.visualMode = false
 				m.visualStart = - 1
