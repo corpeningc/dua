@@ -13,12 +13,6 @@ import (
 	"github.com/corpeningc/dua/internal/scanner"
 )
 
-// LoadingCompleteMsg indicates that a directory has finished loading.
-type LoadingCompleteMsg struct {
-	Path    string
-	Success bool
-	Error   error
-}
 
 // BulkDeletionMsg reports the results of a bulk deletion operation.
 type BulkDeletionMsg struct {
@@ -190,14 +184,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-	case LoadingCompleteMsg:
-		dirInfo := m.findDirectoryInTree(m.rootDir, msg.Path)
-		if dirInfo != nil {
-			dirInfo.IsLoading = false
-			if msg.Success {
-				dirInfo.IsLoaded = true
-			}
-		}
 
 	case StreamingUpdateMsg:
 		log.Printf("DEBUG: Received StreamingUpdateMsg")
@@ -209,7 +195,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.streamingScanner.Stop()
 			}
 		} else {
-			log.Printf("DEBUG: Processing update for path: %s, files: %d, dirs: %d", update.Path, update.FileCount, update.DirCount)
+			log.Printf("DEBUG: Processing update for path: %s, files: %d, dirs: %d, subdirs: %v",
+				update.Path, update.FileCount, update.DirCount,
+				func() []string {
+					if update.DirInfo != nil {
+						var paths []string
+						for _, sub := range update.DirInfo.Subdirs {
+							paths = append(paths, filepath.Base(sub.Path))
+						}
+						return paths
+					}
+					return nil
+				}())
 			// Process incremental update
 			m.progressFiles += update.FileCount
 			m.progressDirs += update.DirCount
@@ -574,11 +571,23 @@ func (m *Model) integrateDirectoryIntoTree(dirInfo *scanner.DirInfo) {
 			if subdir.Path == dirInfo.Path {
 				log.Printf("DEBUG: Replacing subdir at index %d with loaded data", i)
 				parentDir.Subdirs[i] = *dirInfo
+				// Update parent size to include this child's size
+				m.updateParentSizesFromChild(parentPath, dirInfo.Size)
 				break
 			}
 		}
 	} else {
 		log.Printf("DEBUG: Parent directory not found in tree: %s", parentPath)
+	}
+}
+
+func (m *Model) updateParentSizesFromChild(parentPath string, childSize int64) {
+	for parentPath != "/" && parentPath != "." {
+		if dir := m.findDirectoryInTree(m.rootDir, parentPath); dir != nil {
+			log.Printf("DEBUG: Adding %d bytes to parent %s", childSize, parentPath)
+			dir.Size += childSize
+		}
+		parentPath = filepath.Dir(parentPath)
 	}
 }
 
