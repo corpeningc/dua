@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -27,12 +28,14 @@ type BulkDeletionMsg struct {
 	Errors       []error
 }
 
-// StreamingCompleteMsg indicates that streaming directory scan is complete.
-type StreamingCompleteMsg struct {
-	TotalFiles int64
-	TotalDirs  int64
-	TotalBytes int64
-	DirInfo    *scanner.DirInfo
+type StreamingUpdateMsg struct {
+	Update scanner.StreamingUpdate
+	UpdateChan <-chan scanner.StreamingUpdate
+	ErrorChan <-chan error
+}
+
+type StreamErrorMsg struct {
+	Error error
 }
 
 // SortMode defines different ways to sort directory contents.
@@ -65,12 +68,15 @@ type Model struct {
 	rootDir     *scanner.DirInfo
 	currentPath string
 
-	streamingMode bool
+	streamingScanner *scanner.StreamingScanner
+	directoryMap     map[string]*scanner.DirInfo
+	updateChan			<-chan scanner.StreamingUpdate
+	errorChan			<-chan error
 	isScanning    bool
 	scanStartTime time.Time
 
-	progressFiles int64
-	progressDirs  int64
+	progressFiles int
+	progressDirs  int
 	progressBytes int64
 
 	cursor            int
@@ -123,89 +129,56 @@ func NewStreamingModel(path string) Model {
 	}
 
 	return Model{
-		rootDir:       rootDir,
-		currentPath:   path,
-		streamingMode: true,
-		isScanning:    true,
-		scanStartTime: time.Now(),
-		cursor:        0,
-		expanded:      make(map[string]bool),
-		selected:      make(map[string]bool),
-		viewportTop:   0,
-		visualMode:    false,
-		visualStart:   -1,
-		width:         80,
-		height:        24,
-		sortMode:      SortByName,
-		sortAsc:       false,
+		rootDir:          rootDir,
+		currentPath:      path,
+		streamingScanner: scanner.NewStreamingScanner(),
+		directoryMap:     make(map[string]*scanner.DirInfo),
+		isScanning:       true,
+		scanStartTime:    time.Now(),
+		cursor:           0,
+		expanded:         make(map[string]bool),
+		selected:         make(map[string]bool),
+		viewportTop:      0,
+		visualMode:       false,
+		visualStart:      -1,
+		width:            80,
+		height:           24,
+		sortMode:         SortByName,
+		sortAsc:          false,
 	}
 }
 
 // Init initializes the model, starting background loading if in streaming mode.
 func (m Model) Init() tea.Cmd {
-	if m.streamingMode {
-		return m.startSimpleStreaming()
-	}
-	return nil
+	return m.startConcurrentStreaming()
 }
 
-func (m Model) startSimpleStreaming() tea.Cmd {
+func (m Model) startConcurrentStreaming() tea.Cmd {
+	updateChan, errorChan := m.streamingScanner.StartStreaming(m.currentPath)
+
+	return tea.Batch(
+		m.listenForUpdates(updateChan, errorChan),
+		m.listenForErrors(errorChan),
+	)
+}
+
+func (m Model) listenForUpdates(updateChan <-chan scanner.StreamingUpdate, errorChan <-chan error) tea.Cmd {
 	return func() tea.Msg {
-		entries, err := os.ReadDir(m.currentPath)
-		if err != nil {
-			return LoadingCompleteMsg{
-				Path:    m.currentPath,
-				Success: false,
-				Error:   err,
-			}
+		log.Printf("DEBUG: listenForUpdates waiting for update...")
+		update := <-updateChan
+		log.Printf("DEBUG: listenForUpdates received update for: %s", update.Path)
+		return StreamingUpdateMsg{
+			Update: update,
+			UpdateChan: updateChan,
+			ErrorChan: errorChan,
 		}
+	}
+}
 
-		dirInfo := &scanner.DirInfo{
-			Path:      m.currentPath,
-			Size:      0,
-			Files:     make([]scanner.FileInfo, 0),
-			Subdirs:   make([]scanner.DirInfo, 0),
-			IsLoaded:  true,
-			IsLoading: false,
-		}
-
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				if info, err := entry.Info(); err == nil {
-					dirInfo.Files = append(dirInfo.Files, scanner.FileInfo{
-						Name: entry.Name(),
-						Size: info.Size(),
-					})
-					dirInfo.Size += info.Size()
-					dirInfo.FileCount++
-				}
-			}
-		}
-
-		for _, entry := range entries {
-			if entry.IsDir() {
-				fullPath := filepath.Join(m.currentPath, entry.Name())
-				subdir := scanner.DirInfo{
-					Path:        fullPath,
-					Size:        0,
-					Files:       make([]scanner.FileInfo, 0),
-					Subdirs:     make([]scanner.DirInfo, 0),
-					IsLoaded:    false,
-					IsLoading:   false,
-					FileCount:   0,
-					SubdirCount: 0,
-				}
-				dirInfo.Subdirs = append(dirInfo.Subdirs, subdir)
-				dirInfo.SubdirCount++
-			}
-		}
-
-		return StreamingCompleteMsg{
-			TotalFiles: int64(dirInfo.FileCount),
-			TotalDirs:  int64(dirInfo.SubdirCount),
-			TotalBytes: dirInfo.Size,
-			DirInfo:    dirInfo,
-		}
+func (m Model) listenForErrors(errorChan <-chan error) tea.Cmd {
+	return func() tea.Msg {
+		err := <-errorChan
+		return StreamErrorMsg{Error: err}
 	}
 }
 
@@ -226,16 +199,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case StreamingCompleteMsg:
-		m.isScanning = false
-		m.progressFiles = msg.TotalFiles
-		m.progressDirs = msg.TotalDirs
-		m.progressBytes = msg.TotalBytes
+	case StreamingUpdateMsg:
+		log.Printf("DEBUG: Received StreamingUpdateMsg")
+		update := msg.Update
+		if update.IsComplete {
+			log.Printf("DEBUG: Scan complete")
+			m.isScanning = false
+			if m.streamingScanner != nil {
+				m.streamingScanner.Stop()
+			}
+		} else {
+			log.Printf("DEBUG: Processing update for path: %s, files: %d, dirs: %d", update.Path, update.FileCount, update.DirCount)
+			// Process incremental update
+			m.progressFiles += update.FileCount
+			m.progressDirs += update.DirCount
+			m.progressBytes += update.TotalSize
 
-		if msg.DirInfo != nil {
-			m.rootDir = msg.DirInfo
-			m.expanded[msg.DirInfo.Path] = true
+			if update.DirInfo != nil {
+				log.Printf("DEBUG: Storing directory in map: %s", update.DirInfo.Path)
+				m.directoryMap[update.DirInfo.Path] = update.DirInfo
+
+				if update.Path == m.currentPath {
+					log.Printf("DEBUG: Setting root directory: %s", update.Path)
+					m.rootDir = update.DirInfo
+					m.expanded[update.Path] = true
+				} else {
+					// Integrate this directory into the tree structure
+					log.Printf("DEBUG: Integrating directory into tree: %s", update.DirInfo.Path)
+					m.integrateDirectoryIntoTree(update.DirInfo)
+				}
+			}
 		}
+		log.Printf("DEBUG: Returning batch with listeners")
+		return m, tea.Batch(
+			m.listenForUpdates(msg.UpdateChan, msg.ErrorChan),
+			m.listenForErrors(msg.ErrorChan),
+		)
 
 	case BulkDeletionMsg:
 		for _, path := range msg.DeletedPaths {
@@ -272,8 +271,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "right", "l", "enter":
 			if path, isDir := m.getCurrentItem(); isDir && path != "" {
-				m.expanded[path] = true
-				return m, m.startAsyncLoading(path)
+				log.Printf("DEBUG: Attempting to expand directory: %s", path)
+				if _, exists := m.directoryMap[path]; exists {
+					log.Printf("DEBUG: Directory found in map, expanding: %s", path)
+					m.expanded[path] = true
+				} else {
+					log.Printf("DEBUG: Directory not in map yet: %s", path)
+					// Still expand it - it will show loading
+					m.expanded[path] = true
+				}
 			}
 		case "left", "h":
 			if path, isDir := m.getCurrentItem(); isDir && path != "" {
@@ -455,25 +461,6 @@ func (m *Model) findDirectoryInTree (dir *scanner.DirInfo, targetPath string) *s
 	return nil
 }
 
-func (m *Model) startAsyncLoading(path string) tea.Cmd {
-	dirInfo := m.findDirectoryInTree(m.rootDir, path)
-	if dirInfo != nil && !dirInfo.IsLoaded && !dirInfo.IsLoading {
-		return loadDirectoryCmd(dirInfo)
-	}
-	return nil
-}
-
-func loadDirectoryCmd(dirInfo *scanner.DirInfo) tea.Cmd {
-	return func() tea.Msg {
-		err := scanner.LoadDirectoryContents(dirInfo)
-		return LoadingCompleteMsg{
-			Path: dirInfo.Path,
-			Success: err == nil,
-			Error: err,
-		}
-	}
-}
-
 func (m *Model) updateVisualSelection() {
 	// Clear selected and recalculate range
 	m.selected = make(map[string]bool)
@@ -571,6 +558,27 @@ func (m *Model) updateParentSizes(path string) {
 			dir.Size = newSize
 		}
 		path = filepath.Dir(path)
+	}
+}
+
+func (m *Model) integrateDirectoryIntoTree(dirInfo *scanner.DirInfo) {
+	parentPath := filepath.Dir(dirInfo.Path)
+	log.Printf("DEBUG: Looking for parent directory: %s", parentPath)
+
+	// Find the parent directory in the tree
+	parentDir := m.findDirectoryInTree(m.rootDir, parentPath)
+	if parentDir != nil {
+		log.Printf("DEBUG: Found parent directory, updating subdirs")
+		// Find the corresponding subdir entry and replace it with the loaded data
+		for i, subdir := range parentDir.Subdirs {
+			if subdir.Path == dirInfo.Path {
+				log.Printf("DEBUG: Replacing subdir at index %d with loaded data", i)
+				parentDir.Subdirs[i] = *dirInfo
+				break
+			}
+		}
+	} else {
+		log.Printf("DEBUG: Parent directory not found in tree: %s", parentPath)
 	}
 }
 

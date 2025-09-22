@@ -48,13 +48,13 @@ func (m Model) ViewTree() string {
 
 	header := fmt.Sprintf("DUA - Disk Usage Analyzer | Path: %s | Sort: %s%s", m.currentPath, m.sortMode.String(), direction)
 
-	// Add scanning progress if in streaming mode
-	if m.streamingMode && m.isScanning {
+	// Add scanning progress
+	if m.isScanning {
 		elapsed := time.Since(m.scanStartTime)
 		progress := fmt.Sprintf(" | SCANNING: %d files, %d dirs, %s in %v",
 			m.progressFiles, m.progressDirs, formatSize(m.progressBytes), elapsed.Truncate(time.Second))
 		header += progress
-	} else if m.streamingMode {
+	} else {
 		// Show final stats
 		finalStats := fmt.Sprintf(" | SCANNED: %d files, %d dirs, %s",
 			m.progressFiles, m.progressDirs, formatSize(m.progressBytes))
