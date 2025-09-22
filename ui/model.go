@@ -6,25 +6,34 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/corpeningc/dua/internal/scanner"
 )
 
-type LoadingCompleteMsg struct {
-	Path string
-	Success bool
-	Error error
-}
 
+// BulkDeletionMsg reports the results of a bulk deletion operation.
 type BulkDeletionMsg struct {
 	DeletedPaths []string
 	SuccessCount int
-	ErrorCount int
-	Erros []error
+	ErrorCount   int
+	Errors       []error
 }
 
+type StreamingUpdateMsg struct {
+	Update scanner.StreamingUpdate
+	UpdateChan <-chan scanner.StreamingUpdate
+	ErrorChan <-chan error
+}
+
+type StreamErrorMsg struct {
+	Error error
+}
+
+// SortMode defines different ways to sort directory contents.
 type SortMode int
+
 const (
 	SortByName SortMode = iota
 	SortByDate
@@ -34,226 +43,300 @@ const (
 
 func (s SortMode) String() string {
 	switch s {
-		case SortByName:
-			return "Name"
-		case SortByDate:
-			return "Date"
-		case SortBySize:
-			return "Size"
-		case SortByType:
-			return "Type"
-		default:
-			return "Unknown"
+	case SortByName:
+		return "Name"
+	case SortByDate:
+		return "Date"
+	case SortBySize:
+		return "Size"
+	case SortByType:
+		return "Type"
+	default:
+		return "Unknown"
 	}
 }
 
+// Model represents the application state for the directory viewer.
 type Model struct {
-	// Directory data
-	rootDir *scanner.DirInfo
+	rootDir     *scanner.DirInfo
 	currentPath string
 
-	// UI state
-	cursor int // Which item is selected
-	selected map[string]bool // Which items are selected
-	expanded map[string]bool // Which directories are expanded
+	streamingScanner *scanner.StreamingScanner
+	directoryMap     map[string]*scanner.DirInfo
+	updateChan			<-chan scanner.StreamingUpdate
+	errorChan			<-chan error
+	isScanning    bool
+	scanStartTime time.Time
+
+	progressFiles int
+	progressDirs  int
+	progressBytes int64
+
+	cursor            int
+	selected          map[string]bool
+	expanded          map[string]bool
 	markedForDeletion map[string]bool
-	viewportTop int // First visible item index
+	viewportTop       int
 
-	// Visual mode
-	visualMode bool
-	visualStart int // Anchor point for visual mode
+	visualMode  bool
+	visualStart int
 
-	// Deletion mode
 	deletionMode bool
 
-	// Sorting state
 	sortMode SortMode
-	sortAsc bool
+	sortAsc  bool
 
-	// View state
-	width int
+	width  int
 	height int
 }
 
+// NewModel creates a new model for the directory viewer.
 func NewModel(rootDir *scanner.DirInfo, path string) Model {
-	return Model {
-		rootDir: rootDir,
+	return Model{
+		rootDir:     rootDir,
 		currentPath: path,
-
-		cursor: 0,
-		expanded: make(map[string]bool),
-		selected: make(map[string]bool),
+		cursor:      0,
+		expanded:    make(map[string]bool),
+		selected:    make(map[string]bool),
 		viewportTop: 0,
-
-		visualMode: false,
+		visualMode:  false,
 		visualStart: -1,
-
-		width: 80,
-		height: 24,
-
-		sortMode: SortByName,
-		sortAsc: false,
+		width:       80,
+		height:      24,
+		sortMode:    SortByName,
+		sortAsc:     false,
 	}
 }
 
-	func (m Model) Init() tea.Cmd {
-		return nil
+// NewStreamingModel creates a model with fast startup and progressive loading.
+func NewStreamingModel(path string) Model {
+	rootDir := &scanner.DirInfo{
+		Path:        path,
+		Size:        0,
+		Files:       make([]scanner.FileInfo, 0),
+		Subdirs:     make([]scanner.DirInfo, 0),
+		IsLoaded:    false,
+		IsLoading:   true,
+		FileCount:   0,
+		SubdirCount: 0,
 	}
 
-	func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-		switch msg := msg.(type) {
-			case tea.WindowSizeMsg:
-				m.width = msg.Width
-				m.height = msg.Height
+	return Model{
+		rootDir:          rootDir,
+		currentPath:      path,
+		streamingScanner: scanner.NewStreamingScanner(),
+		directoryMap:     make(map[string]*scanner.DirInfo),
+		isScanning:       true,
+		scanStartTime:    time.Now(),
+		cursor:           0,
+		expanded:         make(map[string]bool),
+		selected:         make(map[string]bool),
+		viewportTop:      0,
+		visualMode:       false,
+		visualStart:      -1,
+		width:            80,
+		height:           24,
+		sortMode:         SortByName,
+		sortAsc:          false,
+	}
+}
 
-			case LoadingCompleteMsg:
-				dirInfo := m.findDirectoryInTree(m.rootDir, msg.Path)
-				if dirInfo != nil {
-					dirInfo.IsLoading = false
-					if msg.Success {
-						dirInfo.IsLoaded = true
-					}
-				}
-			
-			// Update tree
-			case BulkDeletionMsg:
-				for _, path := range msg.DeletedPaths {
-					m.removeItemFromTree(path)
-				}
-				
-				// Reset visual
-				m.visualMode = false
-				m.visualStart = - 1
-				m.selected = make(map[string]bool)
+// Init initializes the model, starting background loading if in streaming mode.
+func (m Model) Init() tea.Cmd {
+	return m.startConcurrentStreaming()
+}
 
-				// Reset deletion
-				m.deletionMode = false
+func (m Model) startConcurrentStreaming() tea.Cmd {
+	updateChan, errorChan := m.streamingScanner.StartStreaming(m.currentPath)
+
+	return tea.Batch(
+		m.listenForUpdates(updateChan, errorChan),
+		m.listenForErrors(errorChan),
+	)
+}
+
+func (m Model) listenForUpdates(updateChan <-chan scanner.StreamingUpdate, errorChan <-chan error) tea.Cmd {
+	return func() tea.Msg {
+		update := <-updateChan
+		return StreamingUpdateMsg{
+			Update: update,
+			UpdateChan: updateChan,
+			ErrorChan: errorChan,
+		}
+	}
+}
+
+func (m Model) listenForErrors(errorChan <-chan error) tea.Cmd {
+	return func() tea.Msg {
+		err := <-errorChan
+		return StreamErrorMsg{Error: err}
+	}
+}
+
+
+// Update handles all messages and user input for the directory viewer.
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+
+
+	case StreamingUpdateMsg:
+		update := msg.Update
+		if update.IsComplete {
+			m.isScanning = false
+			if m.streamingScanner != nil {
+				m.streamingScanner.Stop()
+			}
+		} else {
+			// Process incremental update
+			m.progressFiles += update.FileCount
+			m.progressDirs += update.DirCount
+			m.progressBytes += update.TotalSize
+
+			if update.DirInfo != nil {
+				m.directoryMap[update.DirInfo.Path] = update.DirInfo
+
+				if update.Path == m.currentPath {
+					m.rootDir = update.DirInfo
+					m.expanded[update.Path] = true
+				} else {
+					// Integrate this directory into the tree structure
+					m.integrateDirectoryIntoTree(update.DirInfo)
+				}
+			}
+		}
+		return m, tea.Batch(
+			m.listenForUpdates(msg.UpdateChan, msg.ErrorChan),
+			m.listenForErrors(msg.ErrorChan),
+		)
+
+	case BulkDeletionMsg:
+		for _, path := range msg.DeletedPaths {
+			m.removeItemFromTree(path)
+		}
+
+		m.visualMode = false
+		m.visualStart = -1
+		m.selected = make(map[string]bool)
+
+		m.deletionMode = false
+		m.markedForDeletion = make(map[string]bool)
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q":
+			return m, tea.Quit
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+				if m.visualMode {
+					m.updateVisualSelection()
+				}
+				m.adjustViewport()
+			}
+		case "down", "j":
+			maxItems := m.countVisibleItems()
+			if m.cursor < maxItems-1 {
+				m.cursor++
+				if m.visualMode {
+					m.updateVisualSelection()
+				}
+				m.adjustViewport()
+			}
+		case "right", "l", "enter":
+			if path, isDir := m.getCurrentItem(); isDir && path != "" {
+				m.expanded[path] = true
+			}
+		case "left", "h":
+			if path, isDir := m.getCurrentItem(); isDir && path != "" {
+				m.expanded[path] = false
+			}
+		case "ctrl+s":
+			m.sortAsc = !m.sortAsc
+		case "s":
+			m.sortMode = (m.sortMode + 1) % 4
+		case "esc":
+			m.visualMode = false
+			m.visualStart = -1
+			m.selected = make(map[string]bool)
+			m.deletionMode = false
+			m.markedForDeletion = make(map[string]bool)
+		case "t":
+			if path, _ := m.getCurrentItem(); path != "" {
+				m.selected[path] = true
+			}
+		case "d":
+			if m.deletionMode {
+				if len(m.markedForDeletion) > 0 {
+					return m, m.performBulkDeletion()
+				}
+			} else {
+				m.deletionMode = true
 				m.markedForDeletion = make(map[string]bool)
 
-			case tea.KeyMsg:
-				switch msg.String() {
-				case "ctrl+c", "q":
-					return m, tea.Quit
-				case "up", "k":
-					if m.cursor > 0 {
-						m.cursor--
-						if (m.visualMode) {
-							m.updateVisualSelection()
-						}
-						m.adjustViewport()
+				if m.visualMode && len(m.selected) > 0 {
+					for path := range m.selected {
+						m.markedForDeletion[path] = true
 					}
-				case "down", "j":
-					maxItems := m.countVisibleItems()
-					if m.cursor < maxItems - 1 {
-						m.cursor++
-						if (m.visualMode) {
-							m.updateVisualSelection()
-						}
-						m.adjustViewport()
-					}
-				case "right", "l", "enter":
-					// Expand directory with lazy loading
-					if path, isDir := m.getCurrentItem(); isDir && path != "" {
-						m.expanded[path] = true
-						// Trigger lazy loading if not already loaded
-						return m, m.startAsyncLoading(path)
-					}
-				case "left", "h":
-					// Collapse directory
-					if path, isDir := m.getCurrentItem(); isDir && path != "" {
-						m.expanded[path] = false
-					}
-				case "ctrl+s":
-					m.sortAsc = !m.sortAsc
-				case "s":
-					m.sortMode = (m.sortMode + 1) % 4 // Cycle through sort modes
-				case "esc":
-					// Turn off visual mode and deletion mode
-					m.visualMode = false
-					m.visualStart = -1
-					m.selected = make(map[string]bool)
-					m.deletionMode = false
-					m.markedForDeletion = make(map[string]bool)
-				case "t":
-					// Add current item to selected
+				} else {
 					if path, _ := m.getCurrentItem(); path != "" {
-						m.selected[path] = true
-					}
-				case "d":
-					// Deletion mode already on
-					if m.deletionMode {
-						if len(m.markedForDeletion) > 0 {
-							return m, m.performBulkDeletion()
-						}
-					} else {
-						m.deletionMode = true
-						m.markedForDeletion = make(map[string]bool)
-
-						if m.visualMode && len(m.selected) > 0 {
-							for path := range m.selected {
-								m.markedForDeletion[path] = true
-							}
-						} else {
-							if path, _ := m.getCurrentItem(); path != "" {
-								m.markedForDeletion[path] = true
-							}
-						}
-					}
-				// Navigate to top
-				case "g":
-					m.cursor = 0
-					if m.visualMode {
-						m.updateVisualSelection()
-					}
-					m.adjustViewport()
-				case "G":
-					m.cursor = m.countVisibleItems() - 1
-					if m.visualMode {
-						m.updateVisualSelection()
-					}
-					m.adjustViewport()
-				case "v":
-					if m.visualMode {
-						m.visualMode = false
-						m.visualStart = -1
-						m.selected = make(map[string]bool)
-					} else {
-						m.visualMode = true
-						m.visualStart = m.cursor
-
-						if path, _ := m.getCurrentItem(); path != "" {
-							m.selected[path] = true
-						}
+						m.markedForDeletion[path] = true
 					}
 				}
-		}
-		return m, nil
-	}
+			}
+		case "g":
+			m.cursor = 0
+			if m.visualMode {
+				m.updateVisualSelection()
+			}
+			m.adjustViewport()
+		case "G":
+			m.cursor = m.countVisibleItems() - 1
+			if m.visualMode {
+				m.updateVisualSelection()
+			}
+			m.adjustViewport()
+		case "v":
+			if m.visualMode {
+				m.visualMode = false
+				m.visualStart = -1
+				m.selected = make(map[string]bool)
+			} else {
+				m.visualMode = true
+				m.visualStart = m.cursor
 
-// adjustViewport ensures the cursor stays visible within terminal bounds
+				if path, _ := m.getCurrentItem(); path != "" {
+					m.selected[path] = true
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+// adjustViewport ensures the cursor stays visible within terminal bounds.
 func (m *Model) adjustViewport() {
-	// Reserve 4 lines for header (2) + footer (2)
 	visibleLines := m.height - 4
 	if visibleLines < 1 {
-		visibleLines = 10 // Fallback for very small terminals
+		visibleLines = 10
 	}
-	
-	// Scroll down if cursor is below visible area
-	if m.cursor >= m.viewportTop + visibleLines {
+
+	if m.cursor >= m.viewportTop+visibleLines {
 		m.viewportTop = m.cursor - visibleLines + 1
 	}
-	
-	// Scroll up if cursor is above visible area  
+
 	if m.cursor < m.viewportTop {
 		m.viewportTop = m.cursor
 	}
-	
-	// Don't scroll past the beginning
+
 	if m.viewportTop < 0 {
 		m.viewportTop = 0
 	}
 }
 
+// sortDirectoryContents returns sorted copies of files and subdirectories.
 func (m Model) sortDirectoryContents(dir *scanner.DirInfo) ([]scanner.FileInfo, []scanner.DirInfo) {
 	files := make([]scanner.FileInfo, len(dir.Files))
 	copy(files, dir.Files)
@@ -276,10 +359,8 @@ func (m Model) sortFiles(files []scanner.FileInfo) {
 		case SortBySize:
 			result = files[i].Size < files[j].Size
 		case SortByDate:
-			// Need dates on file info
 			result = strings.ToLower(files[i].Name) < strings.ToLower(files[j].Name)
 		case SortByType:
-			// get extensions
 			extI := getFileExtension(files[i].Name)
 			extJ := getFileExtension(files[j].Name)
 			if extI == extJ {
@@ -306,7 +387,6 @@ func (m Model) sortDirs(subdirs []scanner.DirInfo) {
 			nameI := getBaseName(subdirs[i].Path)
 			nameJ := getBaseName(subdirs[j].Path)
 			result = strings.ToLower(nameI) < strings.ToLower(nameJ)
-
 		case SortBySize:
 			result = subdirs[i].Size < subdirs[j].Size
 		case SortByDate:
@@ -330,9 +410,9 @@ func (m Model) sortDirs(subdirs []scanner.DirInfo) {
 func getFileExtension(filename string) string {
 	parts := strings.Split(filename, ".")
 	if len(parts) > 1 {
-					return parts[len(parts)-1]
+		return parts[len(parts)-1]
 	}
-	return "" // No extension
+	return ""
 }
 
 func (m *Model) findDirectoryInTree (dir *scanner.DirInfo, targetPath string) *scanner.DirInfo {
@@ -347,25 +427,6 @@ func (m *Model) findDirectoryInTree (dir *scanner.DirInfo, targetPath string) *s
 		}
 	}
 	return nil
-}
-
-func (m *Model) startAsyncLoading(path string) tea.Cmd {
-	dirInfo := m.findDirectoryInTree(m.rootDir, path)
-	if dirInfo != nil && !dirInfo.IsLoaded && !dirInfo.IsLoading {
-		return loadDirectoryCmd(dirInfo)
-	}
-	return nil
-}
-
-func loadDirectoryCmd(dirInfo *scanner.DirInfo) tea.Cmd {
-	return func() tea.Msg {
-		err := scanner.LoadDirectoryContents(dirInfo)
-		return LoadingCompleteMsg{
-			Path: dirInfo.Path,
-			Success: err == nil,
-			Error: err,
-		}
-	}
 }
 
 func (m *Model) updateVisualSelection() {
@@ -419,8 +480,8 @@ func (m Model) performBulkDeletion() tea.Cmd {
 		return BulkDeletionMsg{
 			DeletedPaths: deletedPaths,
 			SuccessCount: len(deletedPaths),
-			ErrorCount: len(errors),
-			Erros: errors,
+			ErrorCount:   len(errors),
+			Errors:       errors,
 		}
 	}
 }
@@ -465,6 +526,33 @@ func (m *Model) updateParentSizes(path string) {
 			dir.Size = newSize
 		}
 		path = filepath.Dir(path)
+	}
+}
+
+func (m *Model) integrateDirectoryIntoTree(dirInfo *scanner.DirInfo) {
+	parentPath := filepath.Dir(dirInfo.Path)
+
+	// Find the parent directory in the tree
+	parentDir := m.findDirectoryInTree(m.rootDir, parentPath)
+	if parentDir != nil {
+		// Find the corresponding subdir entry and replace it with the loaded data
+		for i, subdir := range parentDir.Subdirs {
+			if subdir.Path == dirInfo.Path {
+				parentDir.Subdirs[i] = *dirInfo
+				// Update parent size to include this child's size
+				m.updateParentSizesFromChild(parentPath, dirInfo.Size)
+				break
+			}
+		}
+	}
+}
+
+func (m *Model) updateParentSizesFromChild(parentPath string, childSize int64) {
+	for parentPath != "/" && parentPath != "." {
+		if dir := m.findDirectoryInTree(m.rootDir, parentPath); dir != nil {
+			dir.Size += childSize
+		}
+		parentPath = filepath.Dir(parentPath)
 	}
 }
 
