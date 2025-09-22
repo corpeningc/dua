@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -158,9 +157,7 @@ func (m Model) startConcurrentStreaming() tea.Cmd {
 
 func (m Model) listenForUpdates(updateChan <-chan scanner.StreamingUpdate, errorChan <-chan error) tea.Cmd {
 	return func() tea.Msg {
-		log.Printf("DEBUG: listenForUpdates waiting for update...")
 		update := <-updateChan
-		log.Printf("DEBUG: listenForUpdates received update for: %s", update.Path)
 		return StreamingUpdateMsg{
 			Update: update,
 			UpdateChan: updateChan,
@@ -186,48 +183,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 
 	case StreamingUpdateMsg:
-		log.Printf("DEBUG: Received StreamingUpdateMsg")
 		update := msg.Update
 		if update.IsComplete {
-			log.Printf("DEBUG: Scan complete")
 			m.isScanning = false
 			if m.streamingScanner != nil {
 				m.streamingScanner.Stop()
 			}
 		} else {
-			log.Printf("DEBUG: Processing update for path: %s, files: %d, dirs: %d, subdirs: %v",
-				update.Path, update.FileCount, update.DirCount,
-				func() []string {
-					if update.DirInfo != nil {
-						var paths []string
-						for _, sub := range update.DirInfo.Subdirs {
-							paths = append(paths, filepath.Base(sub.Path))
-						}
-						return paths
-					}
-					return nil
-				}())
 			// Process incremental update
 			m.progressFiles += update.FileCount
 			m.progressDirs += update.DirCount
 			m.progressBytes += update.TotalSize
 
 			if update.DirInfo != nil {
-				log.Printf("DEBUG: Storing directory in map: %s", update.DirInfo.Path)
 				m.directoryMap[update.DirInfo.Path] = update.DirInfo
 
 				if update.Path == m.currentPath {
-					log.Printf("DEBUG: Setting root directory: %s", update.Path)
 					m.rootDir = update.DirInfo
 					m.expanded[update.Path] = true
 				} else {
 					// Integrate this directory into the tree structure
-					log.Printf("DEBUG: Integrating directory into tree: %s", update.DirInfo.Path)
 					m.integrateDirectoryIntoTree(update.DirInfo)
 				}
 			}
 		}
-		log.Printf("DEBUG: Returning batch with listeners")
 		return m, tea.Batch(
 			m.listenForUpdates(msg.UpdateChan, msg.ErrorChan),
 			m.listenForErrors(msg.ErrorChan),
@@ -268,15 +247,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "right", "l", "enter":
 			if path, isDir := m.getCurrentItem(); isDir && path != "" {
-				log.Printf("DEBUG: Attempting to expand directory: %s", path)
-				if _, exists := m.directoryMap[path]; exists {
-					log.Printf("DEBUG: Directory found in map, expanding: %s", path)
-					m.expanded[path] = true
-				} else {
-					log.Printf("DEBUG: Directory not in map yet: %s", path)
-					// Still expand it - it will show loading
-					m.expanded[path] = true
-				}
+				m.expanded[path] = true
 			}
 		case "left", "h":
 			if path, isDir := m.getCurrentItem(); isDir && path != "" {
@@ -560,31 +531,25 @@ func (m *Model) updateParentSizes(path string) {
 
 func (m *Model) integrateDirectoryIntoTree(dirInfo *scanner.DirInfo) {
 	parentPath := filepath.Dir(dirInfo.Path)
-	log.Printf("DEBUG: Looking for parent directory: %s", parentPath)
 
 	// Find the parent directory in the tree
 	parentDir := m.findDirectoryInTree(m.rootDir, parentPath)
 	if parentDir != nil {
-		log.Printf("DEBUG: Found parent directory, updating subdirs")
 		// Find the corresponding subdir entry and replace it with the loaded data
 		for i, subdir := range parentDir.Subdirs {
 			if subdir.Path == dirInfo.Path {
-				log.Printf("DEBUG: Replacing subdir at index %d with loaded data", i)
 				parentDir.Subdirs[i] = *dirInfo
 				// Update parent size to include this child's size
 				m.updateParentSizesFromChild(parentPath, dirInfo.Size)
 				break
 			}
 		}
-	} else {
-		log.Printf("DEBUG: Parent directory not found in tree: %s", parentPath)
 	}
 }
 
 func (m *Model) updateParentSizesFromChild(parentPath string, childSize int64) {
 	for parentPath != "/" && parentPath != "." {
 		if dir := m.findDirectoryInTree(m.rootDir, parentPath); dir != nil {
-			log.Printf("DEBUG: Adding %d bytes to parent %s", childSize, parentPath)
 			dir.Size += childSize
 		}
 		parentPath = filepath.Dir(parentPath)

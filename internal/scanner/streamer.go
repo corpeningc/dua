@@ -3,7 +3,6 @@ package scanner
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -64,7 +63,7 @@ func (s *StreamingScanner) StartStreaming(rootPath string) (<-chan StreamingUpda
 	// Start workers
 	for i := 0; i < s.maxWorkers; i++ {
 		s.workerGroup.Add(1)
-		go s.worker(i)
+		go s.worker()
 	}
 
 	go s.monitorCompletion()
@@ -73,7 +72,7 @@ func (s *StreamingScanner) StartStreaming(rootPath string) (<-chan StreamingUpda
 	return s.updateChan, s.errorChan
 }
 
-func (s *StreamingScanner) worker(id int) {
+func (s *StreamingScanner) worker() {
 	defer s.workerGroup.Done()
 	for {
 		select {
@@ -83,7 +82,7 @@ func (s *StreamingScanner) worker(id int) {
 			}
 
 			s.incrementActiveJobs()
-			update := s.scanDirectory(dirPath, id)
+			update := s.scanDirectory(dirPath)
 			s.decrementActiveJobs()
 
 			if update != nil {
@@ -94,7 +93,6 @@ func (s *StreamingScanner) worker(id int) {
 				}
 
 				for _, subdir := range update.DirInfo.Subdirs {
-					log.Printf("DEBUG: About to queue: %s", subdir.Path)
 					s.queueWork(subdir.Path)
 				}
 			}
@@ -119,15 +117,15 @@ func (s *StreamingScanner) Stop() {
 	// Channels will be closed by the queue manager goroutine
 }
 
-func (s *StreamingScanner) scanDirectory(path string, workerID int) *StreamingUpdate {
+func (s *StreamingScanner) scanDirectory(path string) *StreamingUpdate {
 	startTime := time.Now()
 
 	entries, err := os.ReadDir(path)
 
 	if err != nil {
 		select {
-			case s.errorChan <- fmt.Errorf("Error reading directory %s: %v\n", path, err):
-			case <-s.context.Done():
+		case s.errorChan <- fmt.Errorf("Error reading directory %s: %v", path, err):
+		case <-s.context.Done():
 		}
 		return nil
 	}
@@ -253,23 +251,15 @@ func (s *StreamingScanner) manageUnboundedQueue() {
 }
 
 func (s *StreamingScanner) monitorCompletion() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			inputLen := len(s.workInput)
-			queueLen := len(s.workQueue)
-			activeJobs := s.getActiveJobs()
-			log.Printf("DEBUG: Monitor - Input: %d, Queue: %d, Active jobs: %d", inputLen, queueLen, activeJobs)
-
-			// Check if all work is complete
-			if inputLen == 0 && queueLen == 0 && activeJobs == 0 {
-				log.Printf("DEBUG: Monitor - Detected completion, waiting 100ms to confirm")
+			if len(s.workInput) == 0 && len(s.workQueue) == 0 && s.getActiveJobs() == 0 {
 				time.Sleep(100 * time.Millisecond)
 				if len(s.workInput) == 0 && len(s.workQueue) == 0 && s.getActiveJobs() == 0 {
-					log.Printf("DEBUG: Monitor - Sending completion signal")
 					select {
 					case s.updateChan <- StreamingUpdate{IsComplete: true}:
 					case <-s.context.Done():
@@ -278,7 +268,6 @@ func (s *StreamingScanner) monitorCompletion() {
 				}
 			}
 		case <-s.context.Done():
-			log.Printf("DEBUG: Monitor - Context cancelled")
 			return
 		}
 	}
