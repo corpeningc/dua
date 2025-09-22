@@ -34,7 +34,8 @@ type StreamingScanner struct {
 	context context.Context
 	cancel context.CancelFunc
 	workerGroup sync.WaitGroup
-
+	stopped bool
+	stopMutex sync.Mutex
 
 	// State tracking
 	activeJobs int64
@@ -104,12 +105,18 @@ func (s *StreamingScanner) worker(id int) {
 }
 
 func (s *StreamingScanner) Stop() {
+	s.stopMutex.Lock()
+	defer s.stopMutex.Unlock()
+
+	if s.stopped {
+		return // Already stopped
+	}
+
 	s.cancel()
 	s.workerGroup.Wait()
+	s.stopped = true
 
-	close(s.workQueue)
-	close(s.updateChan)
-	close(s.errorChan)
+	// Channels will be closed by the queue manager goroutine
 }
 
 func (s *StreamingScanner) scanDirectory(path string, workerID int) *StreamingUpdate {
@@ -216,6 +223,11 @@ func (s *StreamingScanner) getActiveJobs() int64 {
 
 func (s *StreamingScanner) manageUnboundedQueue() {
 	var queue []string
+	defer func() {
+		close(s.workQueue)
+		close(s.updateChan)
+		close(s.errorChan)
+	}()
 
 	for {
 		if len(queue) == 0 {
@@ -224,7 +236,6 @@ func (s *StreamingScanner) manageUnboundedQueue() {
 			case item := <-s.workInput:
 				queue = append(queue, item)
 			case <-s.context.Done():
-				close(s.workQueue) // Signal workers to stop
 				return
 			}
 		} else {
@@ -235,7 +246,6 @@ func (s *StreamingScanner) manageUnboundedQueue() {
 			case item := <-s.workInput:
 				queue = append(queue, item) // Add new item
 			case <-s.context.Done():
-				close(s.workQueue)
 				return
 			}
 		}
