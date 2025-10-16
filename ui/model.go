@@ -12,7 +12,6 @@ import (
 	"github.com/corpeningc/dua/internal/scanner"
 )
 
-
 // BulkDeletionMsg reports the results of a bulk deletion operation.
 type BulkDeletionMsg struct {
 	DeletedPaths []string
@@ -21,10 +20,18 @@ type BulkDeletionMsg struct {
 	Errors       []error
 }
 
+// RenameMsg reports the result of a rename operation.
+type RenameMsg struct {
+	OldPath string
+	NewPath string
+	Success bool
+	Error   error
+}
+
 type StreamingUpdateMsg struct {
-	Update scanner.StreamingUpdate
+	Update     scanner.StreamingUpdate
 	UpdateChan <-chan scanner.StreamingUpdate
-	ErrorChan <-chan error
+	ErrorChan  <-chan error
 }
 
 type StreamErrorMsg struct {
@@ -63,10 +70,10 @@ type Model struct {
 
 	streamingScanner *scanner.StreamingScanner
 	directoryMap     map[string]*scanner.DirInfo
-	updateChan			<-chan scanner.StreamingUpdate
-	errorChan			<-chan error
-	isScanning    bool
-	scanStartTime time.Time
+	updateChan       <-chan scanner.StreamingUpdate
+	errorChan        <-chan error
+	isScanning       bool
+	scanStartTime    time.Time
 
 	progressFiles int
 	progressDirs  int
@@ -82,6 +89,10 @@ type Model struct {
 	visualStart int
 
 	deletionMode bool
+
+	renameMode     bool
+	renameOrigPath string
+	renameInput    string
 
 	sortMode SortMode
 	sortAsc  bool
@@ -138,6 +149,7 @@ func NewStreamingModel(path string) Model {
 		height:           24,
 		sortMode:         SortByName,
 		sortAsc:          false,
+		renameMode:       false,
 	}
 }
 
@@ -159,9 +171,9 @@ func (m Model) listenForUpdates(updateChan <-chan scanner.StreamingUpdate, error
 	return func() tea.Msg {
 		update := <-updateChan
 		return StreamingUpdateMsg{
-			Update: update,
+			Update:     update,
 			UpdateChan: updateChan,
-			ErrorChan: errorChan,
+			ErrorChan:  errorChan,
 		}
 	}
 }
@@ -173,14 +185,12 @@ func (m Model) listenForErrors(errorChan <-chan error) tea.Cmd {
 	}
 }
 
-
 // Update handles all messages and user input for the directory viewer.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-
 
 	case StreamingUpdateMsg:
 		update := msg.Update
@@ -224,7 +234,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.deletionMode = false
 		m.markedForDeletion = make(map[string]bool)
 
+	case RenameMsg:
+		if msg.Success {
+			m.renameItemInTree(msg.OldPath, msg.NewPath)
+		}
+		// Reset rename mode
+		m.renameMode = false
+		m.renameInput = ""
+		m.renameOrigPath = ""
+
 	case tea.KeyMsg:
+		// Handle rename mode input first
+		if m.renameMode {
+			switch msg.String() {
+			case "enter":
+				// Confirm rename
+				return m, m.performRename()
+			case "esc":
+				// Cancel rename
+				m.renameMode = false
+				m.renameInput = ""
+				m.renameOrigPath = ""
+			case "backspace":
+				if len(m.renameInput) > 0 {
+					m.renameInput = m.renameInput[:len(m.renameInput)-1]
+				}
+			default:
+				// Append typed characters (only single printable characters)
+				if len(msg.String()) == 1 {
+					m.renameInput += msg.String()
+				}
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
@@ -298,6 +341,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateVisualSelection()
 			}
 			m.adjustViewport()
+
+		case "r":
+			if m.renameMode {
+				// Already in rename mode, ignore
+			} else {
+				// Enter rename mode
+				if path, _ := m.getCurrentItem(); path != "" {
+					m.renameMode = true
+					m.renameOrigPath = path
+					m.renameInput = filepath.Base(path) // Pre-fill with current name
+				}
+			}
 		case "v":
 			if m.visualMode {
 				m.visualMode = false
@@ -415,9 +470,9 @@ func getFileExtension(filename string) string {
 	return ""
 }
 
-func (m *Model) findDirectoryInTree (dir *scanner.DirInfo, targetPath string) *scanner.DirInfo {
+func (m *Model) findDirectoryInTree(dir *scanner.DirInfo, targetPath string) *scanner.DirInfo {
 	if dir.Path == targetPath {
-	return dir
+		return dir
 	}
 
 	// Search in subdirectories
@@ -434,7 +489,7 @@ func (m *Model) updateVisualSelection() {
 	m.selected = make(map[string]bool)
 	start := min(m.visualStart, m.cursor)
 	end := max(m.visualStart, m.cursor)
-	
+
 	for i := start; i <= end; i++ {
 		if path, _ := m.findItemAtIndex(m.rootDir, 0, 0, i); path != "" {
 			m.selected[path] = true
@@ -486,6 +541,23 @@ func (m Model) performBulkDeletion() tea.Cmd {
 	}
 }
 
+func (m Model) performRename() tea.Cmd {
+	oldPath := m.renameOrigPath
+	parentDir := filepath.Dir(oldPath)
+	newName := strings.TrimSpace(m.renameInput)
+	newPath := filepath.Join(parentDir, newName)
+
+	return func() tea.Msg {
+		err := os.Rename(oldPath, newPath)
+		return RenameMsg{
+			OldPath: oldPath,
+			NewPath: newPath,
+			Success: err == nil,
+			Error:   err,
+		}
+	}
+}
+
 func (m *Model) removeItemFromTree(targetPath string) {
 	parentPath := filepath.Dir(targetPath)
 
@@ -497,7 +569,7 @@ func (m *Model) removeItemFromTree(targetPath string) {
 				break
 			}
 		}
-		
+
 		for i, subdir := range parent.Subdirs {
 			if subdir.Path == targetPath {
 				parent.Subdirs = append(parent.Subdirs[:i], parent.Subdirs[i+1:]...)
@@ -509,7 +581,42 @@ func (m *Model) removeItemFromTree(targetPath string) {
 
 		m.updateParentSizes(parentPath)
 	}
-} 
+}
+
+func (m *Model) renameItemInTree(oldPath, newPath string) {
+	parentPath := filepath.Dir(oldPath)
+	oldName := filepath.Base(oldPath)
+	newName := filepath.Base(newPath)
+
+	if parent := m.findDirectoryInTree(m.rootDir, parentPath); parent != nil {
+		// Update file
+		for i := range parent.Files {
+			if parent.Files[i].Name == oldName {
+				parent.Files[i].Name = newName
+				return
+			}
+		}
+
+		// Update subdirectory
+		for i := range parent.Subdirs {
+			if filepath.Base(parent.Subdirs[i].Path) == oldName {
+				parent.Subdirs[i].Path = newPath
+				// Update directoryMap
+				if dirInfo, exists := m.directoryMap[oldPath]; exists {
+					delete(m.directoryMap, oldPath)
+					m.directoryMap[newPath] = dirInfo
+					dirInfo.Path = newPath
+				}
+				// Update expanded map
+				if m.expanded[oldPath] {
+					delete(m.expanded, oldPath)
+					m.expanded[newPath] = true
+				}
+				return
+			}
+		}
+	}
+}
 
 func (m *Model) updateParentSizes(path string) {
 	for path != "/" && path != "." {
@@ -560,3 +667,4 @@ func (m *Model) updateParentSizesFromChild(parentPath string, childSize int64) {
 func (m Model) View() string {
 	return m.ViewTree()
 }
+

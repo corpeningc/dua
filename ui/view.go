@@ -78,10 +78,12 @@ func (m Model) ViewTree() string {
 	// Footer with controls
 	b.WriteString("\n")
 	var controls string
-	if m.deletionMode {
+	if m.renameMode {
+		controls = fmt.Sprintf("Rename: %s_ • enter: confirm • esc: cancel", m.renameInput)
+	} else if m.deletionMode {
 		controls = fmt.Sprintf("%d marked for deletion • d: DELETE • esc: cancel", len(m.markedForDeletion))
-	}	else {
-		controls = "↑↓/jk: navigate • →l: expand • ←h: collapse • s: sort • ctrl+s: reverse sort • q: quit"
+	} else {
+		controls = "↑↓/jk: navigate • →l: expand • ←h: collapse • r: rename • d: delete • s: sort • ctrl+s: reverse sort • q: quit"
 	}
 	b.WriteString(controls + "\n")
 
