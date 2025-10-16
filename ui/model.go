@@ -94,6 +94,9 @@ type Model struct {
 	renameOrigPath string
 	renameInput    string
 
+	searchMode  bool
+	searchQuery string
+
 	sortMode SortMode
 	sortAsc  bool
 
@@ -116,6 +119,8 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 		height:      24,
 		sortMode:    SortByName,
 		sortAsc:     false,
+		searchMode:  false,
+		searchQuery: "",
 	}
 }
 
@@ -150,6 +155,8 @@ func NewStreamingModel(path string) Model {
 		sortMode:         SortByName,
 		sortAsc:          false,
 		renameMode:       false,
+		searchMode:       false,
+		searchQuery:      "",
 	}
 }
 
@@ -244,7 +251,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.renameOrigPath = ""
 
 	case tea.KeyMsg:
-		// Handle rename mode input first
+		// Handle search mode input first
+		if m.searchMode {
+			switch msg.String() {
+			case "enter":
+				// Exit search mode (keep filter active)
+				m.searchMode = false
+			case "esc":
+				// Exit search mode and clear search
+				m.searchMode = false
+				m.searchQuery = ""
+				m.cursor = 0
+				m.viewportTop = 0
+			case "backspace":
+				if len(m.searchQuery) > 0 {
+					m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
+					m.cursor = 0
+					m.viewportTop = 0
+				}
+			default:
+				// Append typed characters (only single printable characters)
+				if len(msg.String()) == 1 && msg.String()[0] >= 32 && msg.String()[0] <= 126 {
+					m.searchQuery += msg.String()
+					m.cursor = 0
+					m.viewportTop = 0
+				}
+			}
+			return m, nil
+		}
+
+		// Handle rename mode input
 		if m.renameMode {
 			switch msg.String() {
 			case "enter":
@@ -306,6 +342,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selected = make(map[string]bool)
 			m.deletionMode = false
 			m.markedForDeletion = make(map[string]bool)
+			// Clear search query
+			if m.searchQuery != "" {
+				m.searchQuery = ""
+				m.cursor = 0
+				m.viewportTop = 0
+			}
 		case "t":
 			if path, _ := m.getCurrentItem(); path != "" {
 				m.selected[path] = true
@@ -366,6 +408,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selected[path] = true
 				}
 			}
+		case "/":
+			// Enter search mode
+			m.searchMode = true
+			m.searchQuery = ""
 		}
 	}
 	return m, nil
@@ -511,6 +557,61 @@ func min(a, b int) int {
 	} else {
 		return b
 	}
+}
+
+// fuzzyMatch checks if all characters in query appear in order in target (case-insensitive).
+func fuzzyMatch(query, target string) bool {
+	if query == "" {
+		return true
+	}
+
+	query = strings.ToLower(query)
+	target = strings.ToLower(target)
+
+	queryIdx := 0
+	for i := 0; i < len(target) && queryIdx < len(query); i++ {
+		if target[i] == query[queryIdx] {
+			queryIdx++
+		}
+	}
+
+	return queryIdx == len(query)
+}
+
+// matchesSearch returns true if the file matches the search query.
+func (m Model) matchesSearch(filename string) bool {
+	if m.searchQuery == "" {
+		return true
+	}
+	return fuzzyMatch(m.searchQuery, filename)
+}
+
+// dirMatchesSearch returns true if the directory or any of its contents match the search query.
+func (m Model) dirMatchesSearch(dir *scanner.DirInfo) bool {
+	if m.searchQuery == "" {
+		return true
+	}
+
+	// Check if directory name matches
+	if fuzzyMatch(m.searchQuery, getBaseName(dir.Path)) {
+		return true
+	}
+
+	// Check if any files match
+	for _, file := range dir.Files {
+		if fuzzyMatch(m.searchQuery, file.Name) {
+			return true
+		}
+	}
+
+	// Check if any subdirectories or their contents match
+	for _, subdir := range dir.Subdirs {
+		if m.dirMatchesSearch(&subdir) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (m Model) performBulkDeletion() tea.Cmd {

@@ -78,12 +78,16 @@ func (m Model) ViewTree() string {
 	// Footer with controls
 	b.WriteString("\n")
 	var controls string
-	if m.renameMode {
+	if m.searchMode {
+		controls = fmt.Sprintf("Search: %s_ • enter: confirm • esc: cancel", m.searchQuery)
+	} else if m.renameMode {
 		controls = fmt.Sprintf("Rename: %s_ • enter: confirm • esc: cancel", m.renameInput)
 	} else if m.deletionMode {
 		controls = fmt.Sprintf("%d marked for deletion • d: DELETE • esc: cancel", len(m.markedForDeletion))
+	} else if m.searchQuery != "" {
+		controls = fmt.Sprintf("Filtered: '%s' • /: search • esc: clear • ↑↓/jk: navigate • →l: expand • ←h: collapse • q: quit", m.searchQuery)
 	} else {
-		controls = "↑↓/jk: navigate • →l: expand • ←h: collapse • r: rename • d: delete • s: sort • ctrl+s: reverse sort • q: quit"
+		controls = "/: search • ↑↓/jk: navigate • →l: expand • ←h: collapse • r: rename • d: delete • s: sort • ctrl+s: reverse sort • q: quit"
 	}
 	b.WriteString(controls + "\n")
 
@@ -138,6 +142,11 @@ func (m Model) getCurrentItem() (string, bool) {
 }
 
 func (m Model) findItemAtIndex(dir *scanner.DirInfo, depth int, currentIndex int, targetIndex int) (string, bool) {
+	// Skip if directory doesn't match search
+	if m.searchQuery != "" && !m.dirMatchesSearch(dir) {
+		return "", false
+	}
+
 	if currentIndex == targetIndex {
 		return dir.Path, true
 	}
@@ -148,6 +157,11 @@ func (m Model) findItemAtIndex(dir *scanner.DirInfo, depth int, currentIndex int
 	if depth == 0 || m.expanded[dir.Path] {
 		sortedFiles, sortedSubdirs := m.sortDirectoryContents(dir)
 		for _, file := range sortedFiles {
+			// Skip files that don't match search
+			if m.searchQuery != "" && !m.matchesSearch(file.Name) {
+				continue
+			}
+
 			if currentIndex == targetIndex {
 				return filepath.Join(dir.Path, file.Name), false
 			}
@@ -158,7 +172,7 @@ func (m Model) findItemAtIndex(dir *scanner.DirInfo, depth int, currentIndex int
 			if path, isDir := m.findItemAtIndex(&subdir, depth + 1, currentIndex, targetIndex); path != "" {
 				return path, isDir
 			}
-			
+
 			currentIndex += m.countDirectoryItems(&subdir, depth + 1)
 		}
 	}
@@ -167,22 +181,42 @@ func (m Model) findItemAtIndex(dir *scanner.DirInfo, depth int, currentIndex int
 }
 
 func (m Model) countDirectoryItems(dir *scanner.DirInfo, depth int) int {
+	// Skip if directory doesn't match search
+	if m.searchQuery != "" && !m.dirMatchesSearch(dir) {
+		return 0
+	}
+
 	// Count current directory
 	count := 1
 
 	if depth == 0 || m.expanded[dir.Path] {
-		count += len(dir.Files)
+		// Count files that match search
+		if m.searchQuery == "" {
+			count += len(dir.Files)
+		} else {
+			for _, file := range dir.Files {
+				if m.matchesSearch(file.Name) {
+					count++
+				}
+			}
+		}
 
+		// Count subdirectories that match search
 		for _, subdir := range dir.Subdirs {
 			count += m.countDirectoryItems(&subdir, depth+1)
 		}
 	}
-	
+
 	return count
 }
 
 
 func (m Model) renderDirectoryWithViewport(b *strings.Builder, dir *scanner.DirInfo, depth int, currentIndex int, viewportTop int, maxLines int) int {
+	// Skip if directory doesn't match search
+	if m.searchQuery != "" && !m.dirMatchesSearch(dir) {
+		return currentIndex
+	}
+
 	// Check if we should render this directory
 	linesUsed := strings.Count(b.String(), "\n")
 	if linesUsed >= maxLines {
@@ -221,6 +255,11 @@ func (m Model) renderDirectoryWithViewport(b *strings.Builder, dir *scanner.DirI
 		// Files
 		sortedFiles, sortedSubdirs := m.sortDirectoryContents(dir)
 		for _, file := range sortedFiles {
+			// Skip files that don't match search
+			if m.searchQuery != "" && !m.matchesSearch(file.Name) {
+				continue
+			}
+
 			linesUsed = strings.Count(b.String(), "\n")
 			if linesUsed >= maxLines {
 				break
