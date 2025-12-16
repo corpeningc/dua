@@ -67,6 +67,7 @@ func (s SortMode) String() string {
 type Model struct {
 	rootDir     *scanner.DirInfo
 	currentPath string
+	displayPath string // Absolute path for display purposes only
 
 	streamingScanner *scanner.StreamingScanner
 	directoryMap     map[string]*scanner.DirInfo
@@ -126,6 +127,12 @@ func NewModel(rootDir *scanner.DirInfo, path string) Model {
 
 // NewStreamingModel creates a model with fast startup and progressive loading.
 func NewStreamingModel(path string) Model {
+	// Get absolute path for display
+	displayPath, err := filepath.Abs(path)
+	if err != nil {
+		displayPath = path // Fallback to original path if Abs fails
+	}
+
 	rootDir := &scanner.DirInfo{
 		Path:        path,
 		Size:        0,
@@ -140,6 +147,7 @@ func NewStreamingModel(path string) Model {
 	return Model{
 		rootDir:          rootDir,
 		currentPath:      path,
+		displayPath:      displayPath,
 		streamingScanner: scanner.NewStreamingScanner(),
 		directoryMap:     make(map[string]*scanner.DirInfo),
 		isScanning:       true,

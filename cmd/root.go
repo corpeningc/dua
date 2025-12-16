@@ -25,7 +25,7 @@ func Execute() error {
 	flag.StringVar(&path, "path", ".", "Directory path to analyze")
 	flag.Parse()
 
- // Path validation
+	// Path validation
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		fmt.Printf("Error: Path '%s' does not exist\n", path)
 		os.Exit(1)

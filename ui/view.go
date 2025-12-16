@@ -46,7 +46,7 @@ func (m Model) ViewTree() string {
 		direction = "↑"
 	}
 
-	header := fmt.Sprintf("DUA - Disk Usage Analyzer | Path: %s | Sort: %s%s", m.currentPath, m.sortMode.String(), direction)
+	header := fmt.Sprintf("DUA - Disk Usage Analyzer | Path: %s | Sort: %s%s", m.displayPath, m.sortMode.String(), direction)
 
 	// Add scanning progress
 	if m.isScanning {
